@@ -4,6 +4,7 @@
   python3 ds/plan.py pruefen <name>  # ds/arbeit/<name>.plan.md: Abschnitte, Belege, Schnitt
   python3 ds/plan.py pakete  <name>  # Zahl der Pakete im Schnitt
   python3 ds/plan.py teilen  <name>  # je Paket ds/arbeit/<name>-pN.auftrag.md
+  python3 ds/plan.py budget  <datei> # Lesebudget: Token der genannten Dateien, ganz gelesen
 
 Die Form prueft das Skript, den Inhalt Opus (ohne Code zu lesen). teilen
 schreibt die Paket-Auftraege mechanisch -- kein Modell formuliert um (beim
@@ -15,7 +16,7 @@ Hoechstzahl Pakete.
 import glob, os, re, sys
 
 ABSCHNITTE = ["Befunde", "Alle Leser", "Entscheidungen", "Offene Fragen", "Randfaelle", "Schnitt"]
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.environ.get("DS_REPO") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARBEIT = os.path.join(REPO, "ds", "arbeit")
 PAKETE_MAX = int(os.environ.get("DS_PAKETE", "4"))
 PAKET = re.compile(r"^-\s*(P\d+)\s+([^|]*?)\s*\|\s*Aendern:\s*([^|]*?)\s*\|\s*nach:\s*(.*?)\s*$")
@@ -188,7 +189,96 @@ Pakete bauen eigene Laeufe. Baut auf (schon uebernommen): {nach}.
     return 0
 
 
+# Lesebudget: was kostet es den Arbeiter, die im Auftrag genannten Dateien
+# ganz zu lesen? Read liefert jede Zeile mit Nummer und Tab (~7 Zeichen);
+# Zeichen je Token kalibriert an 404 Read-Ergebnissen aus 40 Laeufen
+# (Median 2,66; 10-90 %: 2,2-2,9; Stand 2026-10-05). Grundlast =
+# System + Rolle + Werkzeuge vor dem Auftrag (gemessen ~6k je Sitzungsstart).
+ZEICHEN_JE_TOKEN = float(os.environ.get("DS_ZEICHEN_JE_TOKEN", "2.66"))
+GRUNDLAST = 6000
+GROSS_ZEILEN = 300
+
+
+def git_dateien():
+    import subprocess
+    try:
+        aus = subprocess.run(["git", "-C", REPO, "ls-files"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return aus.splitlines()
+
+
+def budget(pfad):
+    """Tabelle je genannter Datei; letzte Zeile = Kern-Token (fuer ds-worker.sh).
+
+    Kern = Dateien aus Aendern/LOESCHEN/Lies zuerst/Einstiegsstellen: die liest
+    der Arbeiter wirklich. Nur erwaehnte Dateien (Ziel, Vorgaben, NICHT
+    anfassen) stehen mit in der Tabelle, zaehlen aber nicht zum Kern."""
+    text = lies(pfad)
+    je_name = {}
+    for f in git_dateien():
+        je_name.setdefault(os.path.basename(f), []).append(f)
+    marken, abschnitt, punkt = {}, "Titel", ""
+    for zeile in text.splitlines():
+        if zeile.startswith("## "):
+            abschnitt, punkt = zeile[3:].strip(), ""
+            continue
+        if re.match(r"\s*([-*]|\d+\.)\s", zeile) or not zeile.startswith(" "):
+            punkt = ""  # neuer Spiegelstrich; eingerueckte Zeilen gehoeren zum vorigen
+            for wort, kurz in (("NICHT anfassen", "nicht anfassen"), ("LOESCHEN", "loeschen"),
+                               ("Lies zuerst", "lies zuerst"), ("Einstiegsstellen", "Einstieg"),
+                               ("Aendern", "aendern"), ("Alle Leser", "alle Leser")):
+                if wort in zeile:
+                    punkt = kurz
+                    break
+        marke = f"{abschnitt}/{punkt}" if punkt else abschnitt
+        # LOESCHEN steht oft mitten im Aendern-Punkt: ab dort gilt loeschen
+        teile = re.split(r"(LOESCHEN)", zeile)
+        for i, teil in enumerate(teile):
+            if teil == "LOESCHEN":
+                marke = f"{abschnitt}/loeschen"
+                continue
+            for wort in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", teil):
+                wort = wort.rstrip(".-/")
+                if "." not in wort or wort.startswith("ds/"):
+                    continue
+                kand = [wort] if "/" in wort else je_name.get(wort, [])
+                if len(kand) != 1 or kand[0].startswith("ds/"):
+                    continue
+                if os.path.isfile(os.path.join(REPO, kand[0])):
+                    marken.setdefault(kand[0], []).append(marke)
+    kern_marken = ("/aendern", "/loeschen", "/lies zuerst", "/Einstieg")
+    zeilen = []
+    for rel, ms in marken.items():
+        with open(os.path.join(REPO, rel), "rb") as f:
+            daten = f.read()
+        if b"\0" in daten[:8192]:
+            continue  # binaer (Bild, Modell): Read liefert keinen Text
+        n = daten.count(b"\n") + (0 if daten.endswith(b"\n") or not daten else 1)
+        kern = any(m.endswith(kern_marken) for m in ms)
+        marke = next((m for m in ms if m.endswith(kern_marken)), ms[0]) if kern else ms[0]
+        zeilen.append((kern, round((len(daten) + 7 * n) / ZEICHEN_JE_TOKEN), n, rel, marke))
+    zeilen.sort(reverse=True)
+    grund = GRUNDLAST + round(len(text.encode()) / ZEICHEN_JE_TOKEN)
+    kern = grund + sum(z[1] for z in zeilen if z[0])
+    alle = grund + sum(z[1] for z in zeilen)
+    print(f"Lesebudget {os.path.basename(pfad)} (Datei ganz gelesen, {ZEICHEN_JE_TOKEN} Zeichen/Token):")
+    print(f"{'Token':>8} {'Zeilen':>7}  Datei  [Abschnitt/Punkt]")
+    for i, (k, tok, n, rel, marke) in enumerate(zeilen):
+        if i and not k and zeilen[i - 1][0]:
+            print("         -- nur erwaehnt (zaehlt nicht zum Kern):")
+        hinweis = "  <- gross: nur Fundstellen lesen" if k and n > GROSS_ZEILEN else ""
+        print(f"{tok:>8} {n:>7}  {rel}  [{marke}]{hinweis}")
+    print(f"{grund:>8} {'':>7}  Grundlast + Auftrag")
+    print(f"{kern:>8} {'':>7}  KERN (Grundlast + Aendern/Loeschen/Lies zuerst/Einstieg)")
+    print(f"{alle:>8} {'':>7}  alle genannten Dateien ({len(zeilen)})")
+    print(kern)
+    return 0
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "budget":
+        return budget(sys.argv[2])
     if len(sys.argv) != 3 or sys.argv[1] not in ("pruefen", "pakete", "teilen"):
         sys.exit(__doc__.split("\n\n")[1])
     befehl, name = sys.argv[1], sys.argv[2]

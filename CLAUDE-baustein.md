@@ -30,6 +30,13 @@ Formeln, Reihenfolgen, Grenzen, Einstiegsstellen `datei:zeile`.
   ohne laufende Server.
 - Paketgroesse: Ziel <= ~150 Worker-Zuege; grosse, mehrsprachige Umbauten
   in Vertrag -> Teil A || Teil B schneiden.
+- Lesebudget: vor dem Bauleiter `ds/ds-worker.sh budget <name>`. Kern (Aendern,
+  LOESCHEN, Lies zuerst, Einstiegsstellen) ueber ~55k: grosse Dateien mit
+  datei:zeile eingrenzen oder schneiden, sonst erkundet `start` erst vor
+  (Lagekarte, ~5-10 min). Ueber ~110k: teilen oder `Bauleiter-Plan:`.
+  Dateien, die DeepSeek nur kennen soll, nicht unter Aendern/Lies zuerst.
+- Exit 6 ("ZU GROSS") im Bericht: nicht nacharbeiten -- teilen oder Plan-Modus;
+  der Worktree enthaelt den fertigen Teil.
 
 ### `Bauleiter-Plan:` (DeepSeek plant, du pruefst ohne Code)
 1. Kurzauftrag `ds/arbeit/<name>.auftrag.md` nach `ds/plan-vorlage.md`:
@@ -61,6 +68,8 @@ Formeln, Reihenfolgen, Grenzen, Einstiegsstellen `datei:zeile`.
 1. Offene Fragen an den Nutzer.
 2. Heikle Stellen gegenlesen: `ds/ds-worker.sh diff <name> -- <datei>`.
 3. `ds/ds-worker.sh uebernehmen <name>` (prueft danach selbst im Haupt-Checkout).
+   Bei Konflikt meldet es je Datei ok/3way/KONFLIKT; Rest von Hand, dann
+   `verwerfen`.
 4. Erkenntnisse ins Projektgedaechtnis, Commit vorschlagen (nicht ungefragt committen).
 5. Dem Nutzer `ds/ds-worker.sh tokens <name>` zeigen; Hauptzahl ist die Ersparnis.
 6. Lernschleife: Zeile + Massnahme in `ds/LEHREN.md`.

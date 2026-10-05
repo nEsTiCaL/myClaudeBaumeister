@@ -21,9 +21,10 @@ paket.sh                 baut dist/bauleiter.tar.gz zum Weitergeben
 CLAUDE-baustein.md       Abschnitt für die CLAUDE.md des Projekts (Kontext für Opus)
 vorlage/                 was ins Projekt kopiert wird:
   .claude/agents/ds-bauleiter.md   der Subagent (Haiku) inkl. Sperr-Hook
-  ds/ds-worker.sh                  Werkzeug: start/plan/bauen/teilen/warte/pruefen/nacharbeit/diff/uebernehmen/tokens
-  ds/plan.py                       Plan-Modus: Formprüfung des Plans, Teilen in Pakete
+  ds/ds-worker.sh                  Werkzeug: start/budget/plan/bauen/teilen/warte/pruefen/nacharbeit/diff/uebernehmen/tokens
+  ds/plan.py                       Plan-Modus: Formprüfung des Plans, Teilen in Pakete; Lesebudget
   ds/arbeiter-pruef.sh             Hook: prüft jede von DeepSeek editierte Datei sofort
+  ds/arbeiter-merker.sh            Hook: verlangt DeepSeeks Aufgabenliste (Staffelstab für Etappen)
   ds/bauleiter-sperre.sh           Hook: verbietet dem Bauleiter Übernehmen, git, Auftrag ändern
   ds/tokens.py                     Kosten je Ebene + Ersparnis gegenüber „Opus baut direkt“
   ds/projekt.sh                    PROJEKTDATEI: Test-Freigaben, Prüfbefehle, Kopien
@@ -111,11 +112,24 @@ zerlegt.
 |---|---|---|
 | `DS_KONTEXT` | 110000 | Kontextgröße, ab der eine frische Sitzung (Etappe) weitermacht, statt dass Claude Code zusammenfasst |
 | `DS_ETAPPEN` | 4 | höchstens so viele Etappen je Lauf |
+| `DS_LESEBUDGET` | `DS_KONTEXT`/2 | Kern-Lesebudget (Token), ab dem `start` zuerst vorerkundet (Lagekarte) |
+| `DS_VORERKUNDUNG` | auto | `auto` (über dem Budget und bei Etappe ohne Fortschritt), `immer`, `aus` |
+| `DS_ZEICHEN_JE_TOKEN` | 2,66 | Schätzfaktor des Lesebudgets (Read-Ausgabe, gemessen) |
 | `DS_ZUEGE_MAX` / `DS_ZUEGE_RICHT` | 250 / 150 | Notbremse / Richtwert Züge je Sitzung |
 | `DS_PLAN_ZUEGE` / `DS_PLAN_ZUEGE_MAX` | 60 / 100 | Richtwert / Grenze der Planphase |
 | `DS_PAKETE` | 4 | höchstens so viele Pakete im Schnitt |
 | `DS_MODEL`, `DS_EFFORT` | deepseek-flash, – | Modell, `--effort` (A/B-Messungen) |
 | `DS_STILL`, `DS_API_STILL`, `DS_MAX`, `DS_PROBE` | 300, 90, 3600, 45 | Watchdog-Fristen in Sekunden |
+
+## Exit-Codes von `ds-worker.sh`
+
+| Code | Bedeutung |
+|---|---|
+| 0 | fertig (Bericht lesen: erledigt/teilweise) |
+| 1 | Fehler oder Verweigerung (Auftrag unvollständig, Worktree existiert; `uebernehmen`: Rest offen) |
+| 3 | Abbruch durch den Watchdog (Modell hängt) – später `nacharbeit` |
+| 5 | Plan-Formprüfung fehlgeschlagen |
+| 6 | zu groß: Etappe ohne Fortschritt (auch nach Vorerkundung) oder Etappengrenze – teilen oder Plan-Modus |
 
 ## Nur für dich statt für ein Projekt?
 

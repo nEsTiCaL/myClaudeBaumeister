@@ -7,7 +7,8 @@ wie viel sie gegenueber "Opus baut direkt" spart.
 
 1. `ds/ds-worker.sh tokens <name>` -> Ersparnis-Zeile (Delegation vs. direkt).
 2. Was lief schief oder umstaendlich? (Nacharbeit, Regelverstoss, Rueckfrage,
-   eigener Nachbau durch Opus, Umfangsfehler im Brief, Etappen.) War der Weg
+   eigener Nachbau durch Opus, Umfangsfehler im Brief, Etappen, Exit 6,
+   Lesebudget/Vorerkundung im Bericht, Luecken der Lagekarte.) War der Weg
    richtig gewaehlt (direkt / klassisch / Plan-Modus, Faustregel in CLAUDE.md)?
    Hohe "Opus-Vorbereitung" bei klassisch -> naechstes Mal Plan-Modus.
 3. Jede Lehre bekommt GENAU EINE Massnahme am richtigen Ort:

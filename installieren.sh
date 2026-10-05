@@ -18,7 +18,7 @@ ziel=${1:-}; modus=${2:-}
 ziel=$(git -C "$ziel" rev-parse --show-toplevel 2>/dev/null) ||
   { echo "$1 ist kein git-Repository (der Bauleiter braucht git-Worktrees)" >&2; exit 1; }
 
-WERKZEUG=(ds/ds-worker.sh ds/arbeiter-pruef.sh ds/bauleiter-sperre.sh ds/tokens.py
+WERKZEUG=(ds/ds-worker.sh ds/arbeiter-pruef.sh ds/arbeiter-merker.sh ds/bauleiter-sperre.sh ds/tokens.py
           ds/plan.py .claude/agents/ds-bauleiter.md)
 PROJEKT=(ds/projekt.sh ds/auftrag-vorlage.md ds/plan-vorlage.md)
 [[ -e $ziel/ds/ds-worker.sh ]] || PROJEKT+=(ds/LEHREN.md)   # Erstinstallation
@@ -26,7 +26,8 @@ PROJEKT=(ds/projekt.sh ds/auftrag-vorlage.md ds/plan-vorlage.md)
 if [[ $modus == --pruefen ]]; then
   for f in "${WERKZEUG[@]}"; do
     if [[ ! -e $ziel/$f ]]; then echo "neu        $f"
-    elif ! cmp -s "$V/$f" "$ziel/$f"; then echo "geaendert  $f"; diff -u "$ziel/$f" "$V/$f" | sed -n '3,$p' | head -n 40
+    elif ! cmp -s "$V/$f" "$ziel/$f"; then echo "geaendert  $f"
+      { diff -u "$ziel/$f" "$V/$f" || true; } | sed -n '3,$p' | head -n 40 || true   # diff: Exit 1 bei Unterschied
     fi
   done
   for f in "${PROJEKT[@]}"; do [[ -e $ziel/$f ]] || echo "neu        $f (Projektdatei)"; done
@@ -48,6 +49,7 @@ gi="$ziel/.gitignore"
 grep -qx 'ds/arbeit/' "$gi" 2>/dev/null || { echo 'ds/arbeit/' >> "$gi"; echo "ergaenzt     .gitignore: ds/arbeit/"; }
 
 bash "$ziel/ds/bauleiter-sperre.sh" --test >/dev/null && echo "Sperre: Selbsttest gruen"
+bash "$ziel/ds/arbeiter-merker.sh" --test >/dev/null && echo "Merk-Hook: Selbsttest gruen"
 fehlt=()
 for c in git jq curl python3 pgrep claude; do command -v "$c" >/dev/null || fehlt+=("$c"); done
 (( ${#fehlt[@]} == 0 )) || echo "WARNUNG: fehlende Werkzeuge: ${fehlt[*]}"

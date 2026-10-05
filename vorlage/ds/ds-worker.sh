@@ -4,6 +4,7 @@
 # Reviewer ist die Claude-Sitzung im Haupt-Checkout. Projektanpassung: ds/projekt.sh.
 #
 #   ds/ds-worker.sh start      <name>   # ds/arbeit/<name>.auftrag.md ausfuehren
+#   ds/ds-worker.sh budget     <name>   # Lesebudget des Auftrags (Token je genannter Datei)
 #   ds/ds-worker.sh plan       <name>   # Plan-Modus 1: nur lesen, Plan -> <name>.plan.md
 #   ds/ds-worker.sh form       <name>   # Plan-Modus: Formpruefung des Plans (ds/plan.py)
 #   ds/ds-worker.sh bauen      <name>   # Plan-Modus 2: Auftrag + Plan + <name>.freigabe.md
@@ -34,6 +35,18 @@
 # Aufgabenliste); hoechstens DS_ETAPPEN (4) Etappen je Lauf. Grund: Claude Code
 # fasst sonst bei ~150k automatisch zusammen und kann dabei Freigabe-Korrekturen
 # verlieren (Plan-Modus-Test tempo-v7, 2026-10-04: zwei Compactions).
+# Endet eine Etappe ohne neue Aenderung im Worktree, startet keine gleiche
+# Etappe mehr (sie wuerde dasselbe erneut lesen; ui-zusammenbau 2026-10-05):
+# erst Vorerkundung, beim zweiten Mal Exit 6 (zu gross). Etappengrenze: Exit 6.
+# Lesebudget: start schaetzt die Token der im Auftrag genannten Dateien
+# (ds/plan.py budget, ganz gelesen; (Bytes + 7*Zeilen) / DS_ZEICHEN_JE_TOKEN,
+# kalibriert an 404 Read-Ergebnissen: 2,66). Ueber DS_LESEBUDGET Token
+# (Standard DS_KONTEXT/2) erkundet zuerst eine Nur-Lese-Sitzung mit der
+# Planer-Rolle vor und schreibt eine Lagekarte (Fundstellen, Schnittstellen,
+# Reihenfolge -- keine Entscheidungen, die stehen im Auftrag); gebaut wird mit
+# Auftrag + Lagekarte. DS_VORERKUNDUNG=auto|immer|aus.
+# Exit-Codes: 0 fertig, 1 Fehler/Verweigerung, 3 Abbruch (Watchdog/Modell),
+# 5 Planform fehlerhaft, 6 zu gross fuer eine Sitzung (teilen oder Plan-Modus).
 # Plan-Modus: Richtwert DS_PLAN_ZUEGE (60), Grenze DS_PLAN_ZUEGE_MAX (100),
 # hoechstens DS_PAKETE (4) Pakete im Schnitt.
 # Braucht: bash >= 4.4, git, jq, curl, python3, pgrep, GNU stat/tac/realpath, claude (CLI).
@@ -54,7 +67,9 @@ KONTEXT_MAX=${DS_KONTEXT:-110000}
 ETAPPEN_MAX=${DS_ETAPPEN:-4}
 PLAN_ZUEGE_RICHT=${DS_PLAN_ZUEGE:-60}
 PLAN_ZUEGE_MAX=${DS_PLAN_ZUEGE_MAX:-100}
-export DS_PAKETE=${DS_PAKETE:-4}
+LESEBUDGET=${DS_LESEBUDGET:-$(( KONTEXT_MAX / 2 ))}
+VORERKUNDUNG=${DS_VORERKUNDUNG:-auto}
+export DS_PAKETE=${DS_PAKETE:-4} DS_ZEICHEN_JE_TOKEN=${DS_ZEICHEN_JE_TOKEN:-2.66}
 
 DS_ERLAUBT=(); DS_NUR_LESEN=(memory); DS_KOPIEREN=(); DS_FEHLERMUSTER=()
 DS_HINWEIS_PRUEFEN='Pruefe deine Arbeit mit den Befehlen unter "## Abnahme" im Auftrag.'
@@ -63,7 +78,7 @@ vor_pruefen() { :; }
 mkdir -p "$ARBEIT"
 
 cmd=${1:-}; name=${2:-}
-[[ -n $cmd && -n $name ]] || { sed -n 6,19p "$0"; exit 2; }
+[[ -n $cmd && -n $name ]] || { sed -n 6,20p "$0"; exit 2; }
 [[ $name =~ ^[a-z0-9-]+$ ]] || { echo "Name nur a-z, 0-9, -" >&2; exit 2; }
 WT="$WT_BASIS/$name"
 ZWEIG="ds/$name"
@@ -91,8 +106,11 @@ Werkzeuge (jede Ablehnung kostet Zuege):
   Fundstelle); Dateien ueber ~300 Zeilen nie ganz. Unabhaengige Such- und
   Leseschritte buendelst du in EINER Antwort (mehrere Tool-Aufrufe zugleich).
 Vorgehen:
-- Starte bei den Einstiegsstellen aus dem Auftrag; erkunde nur, was der
-  naechste Schritt braucht.
+- Starte bei den Einstiegsstellen aus dem Auftrag (oder der Lagekarte);
+  erkunde nur, was der naechste Schritt braucht.
+- Lege frueh eine Aufgabenliste mit TodoWrite an, je Punkt die Fundstellen
+  (datei:zeile), und halte sie aktuell. Sie ist dein Staffelstab: bei grossem
+  Kontext macht eine frische Sitzung mit genau dieser Liste weiter.
 - Baue in Teilschritten (ein Vertrag, eine Funktion, ein Test). Nach jedem
   Edit prueft ein Hook die Datei und haengt Fehler an: sofort beheben, ausser
   sie stammen erkennbar von einem noch offenen Teil desselben Teilschritts.
@@ -148,7 +166,35 @@ Hoechstens ${DS_PAKETE} Pakete mit disjunkten Dateien; jedes Paket ist ein allei
 testbarer Teil, keine Mini-Pakete. Kleiner Auftrag: genau ein Paket P1.
 Abhaengigkeiten als \"nach: P1\" (das Paket baut auf dem uebernommenen P1 auf)."
 
-MODUS=bau   # bau | plan (starte_claude)
+# Rolle der Vorerkundung (lage): Planer-Werkzeuge, aber der Auftrag ist schon
+# entschieden. Ergebnis ist eine Lagekarte, mit der der Arbeiter nur noch die
+# Fundstellen liest statt ganzer Dateien (Lesebudget ueber DS_LESEBUDGET).
+LAGE_ROLLE="Du bist der Erkunder (DeepSeek) in diesem Projekt. Der Auftrag unten ist
+fertig entschieden; ein Arbeiter baut ihn nach dir in einer frischen Sitzung
+mit kleinem Kontext. Deine Lagekarte erspart ihm das Lesen ganzer Dateien.
+Du hast nur Lese-Werkzeuge und aenderst nichts.
+- Dein Arbeitsverzeichnis ist die Worktree-Wurzel; relative Pfade.
+- Gezielt erkunden: Grep -n, dann Read mit offset/limit (~80 Zeilen um die
+  Fundstelle), nie ganze grosse Dateien. Unabhaengige Such- und Leseschritte
+  buendelst du in EINER Antwort. Richtwert ${PLAN_ZUEGE_RICHT} Tool-Aufrufe, Grenze ${PLAN_ZUEGE_MAX}.
+- Nur Fakten, keine Entscheidungen: was der Auftrag offen laesst, steht unter
+  Luecken. Keine Zugzahlen oder Aufwaende schaetzen.
+- Zeilenangaben exakt (datei:von-bis), damit der Arbeiter genau dort liest.
+Deine LETZTE Antwort ist die Lagekarte, ohne Vorrede, hoechstens ~150 Zeilen,
+genau mit diesen Abschnitten:
+## Fundstellen
+- \`datei:von-bis\` -- was dort steht -- was der Auftrag dort aendert
+## Schnittstellen
+- \`datei:zeile\` \`signatur/signal/konstante\` -- Bedeutung (was der Arbeiter
+  aufruft oder nachahmt, ohne die Datei lesen zu muessen)
+## Alle Leser
+Je Gruppe der Grep-Befehl, dann die Fundstellen \`datei:zeile\`.
+## Reihenfolge
+1. Teilschritt -- Dateien -- gezielter Test danach
+## Luecken
+- was der Auftrag nicht festlegt oder was nicht zum Code passt (oder \"keine\")"
+
+MODUS=bau   # bau | plan | lage (starte_claude)
 
 starte_claude() {  # $1 Prompt-Datei, weitere Argumente an claude
   # Nur im Hintergrund aufrufen (laufe): cd + exec ersetzen die Subshell durch
@@ -159,17 +205,22 @@ starte_claude() {  # $1 Prompt-Datei, weitere Argumente an claude
   local -a gesperrt=() effort=() modus
   for p in "${DS_NUR_LESEN[@]}"; do gesperrt+=("Edit($p/**)" "Write($p/**)"); done
   [[ -z ${DS_EFFORT:-} ]] || effort=(--effort "$DS_EFFORT")
-  if [[ $MODUS == plan ]]; then
-    modus=(--append-system-prompt "$PLAN_ROLLE" --max-turns "$PLAN_ZUEGE_MAX"
+  if [[ $MODUS == plan || $MODUS == lage ]]; then
+    local rolle=$PLAN_ROLLE
+    [[ $MODUS == lage ]] && rolle=$LAGE_ROLLE
+    modus=(--append-system-prompt "$rolle" --max-turns "$PLAN_ZUEGE_MAX"
            --setting-sources project,local
            --tools Read,Glob,Grep --allowedTools Read Glob Grep
            --disallowedTools WebFetch WebSearch)
   else
     # Pruef-Hook nach jedem Edit; nur Projekt-Einstellungen laden, nicht die des
     # Nutzers (dessen Hooks, z. B. Prompt-Sperren, gelten fuer den Arbeiter nicht).
+    # Merk-Hook nach Lese-Schritten: verlangt die Aufgabenliste (Staffelstab).
     local settings="$ARBEIT/$name.settings.json"
-    jq -n --arg c "$REPO/ds/arbeiter-pruef.sh" '{hooks:{PostToolUse:[{matcher:"Edit|Write|MultiEdit",
-      hooks:[{type:"command", command:$c, timeout:60}]}]}}' > "$settings"
+    jq -n --arg c "$REPO/ds/arbeiter-pruef.sh" \
+          --arg m "$(printf '%q %q' "$REPO/ds/arbeiter-merker.sh" "$KONTEXT_MAX")" '{hooks:{PostToolUse:[
+      {matcher:"Edit|Write|MultiEdit", hooks:[{type:"command", command:$c, timeout:60}]},
+      {matcher:"Read|Grep|Glob", hooks:[{type:"command", command:$m, timeout:20}]}]}}' > "$settings"
     modus=(--append-system-prompt "$ROLLE" --permission-mode acceptEdits
            --setting-sources project,local --settings "$settings"
            --max-turns "$ZUEGE_MAX"
@@ -249,7 +300,10 @@ laufe() {  # $1 Prompt-Datei, $2 Ergebnis-JSON, weitere Argumente an claude
   trap - EXIT INT TERM
   # Token-Deltas brauchte nur der Watchdog als Lebenszeichen; im Protokoll
   # bleiben die ganzen Nachrichten (sonst leicht 30 MB, fast nur Deltas).
-  grep -v -e '"type":"stream_event"' -e '"subtype":"thinking_tokens"' "$log" > "$log.neu" || true
+  # message_delta bleibt: nur dort steht die Ausgabe-Tokenzahl je API-Aufruf
+  # (die assistant-Nachrichten im Stream tragen output_tokens 0).
+  awk '!/"subtype":"thinking_tokens"/ && (!/"type":"stream_event"/ || /"type":"message_delta"/)' \
+    "$log" > "$log.neu" || true
   mv "$log.neu" "$log"
   grep '"type":"result"' "$log" | tail -n1 > "$out" || true
   # Selbst beendet (Watchdog/Etappe): claude schreibt beim Beenden oft noch ein
@@ -258,18 +312,22 @@ laufe() {  # $1 Prompt-Datei, $2 Ergebnis-JSON, weitere Argumente an claude
     grund=${grund:-"claude endete ohne Ergebnis"}
     # Ersatz-Ergebnis; Token aus den Nachrichten des Protokolls (je message.id
     # die vollstaendigste), damit tokens.py auch abgebrochene Laeufe zaehlt.
+    # Ausgabe aus den message_delta-Ereignissen (bis 2026-10-05 stand hier
+    # bei jeder Etappe 0).
     local sid; sid=$(grep -m1 -o '"session_id":"[^"]*"' "$log" | cut -d'"' -f4 || true)
     local typ=abbruch_watchdog text="ABBRUCH (Watchdog): $grund. Spaeter erneut mit nacharbeit."
     [[ -n $etappe ]] && { typ=etappe; text="ETAPPE: $grund; frische Sitzung macht weiter."; }
     jq -s --arg typ "$typ" --arg text "$text" --arg sid "$sid" --argjson ms $(( (SECONDS - start) * 1000 )) '
-      [.[] | select(.type == "assistant" and .message.usage)] | group_by(.message.id)
+      [.[] | select(.type == "stream_event" and .event.type == "message_delta")
+       | .event.usage.output_tokens // 0] as $delta
+      | [.[] | select(.type == "assistant" and .message.usage)] | group_by(.message.id)
       | map(max_by(.message.usage.output_tokens) | .message.usage) as $u
       | {type:"result", subtype:$typ, is_error:($typ != "etappe"), session_id:$sid,
          num_turns:($u|length), duration_ms:$ms, permission_denials:[],
          usage:{input_tokens:([$u[].input_tokens]|add // 0),
                 cache_read_input_tokens:([$u[].cache_read_input_tokens // 0]|add // 0),
                 cache_creation_input_tokens:([$u[].cache_creation_input_tokens // 0]|add // 0),
-                output_tokens:([$u[].output_tokens]|add // 0)},
+                output_tokens:([([$u[].output_tokens]|add // 0), ($delta|add // 0)]|max)},
          result:$text}' "$log" > "$out"
     [[ -n $etappe ]] && return 4
     echo "ds-worker: ABBRUCH -- $grund" >&2
@@ -320,13 +378,41 @@ EOF
   cat "$1"
 }
 
+diff_stand() { zeige_diff --binary | sha1sum | cut -c1-40; }
+
+zu_gross() {  # $1 Ergebnis-JSON, $2 Grund -> Ergebnis umschreiben, Exit 6
+  local text="ZU GROSS: $2 Die Arbeit passt nicht in eine Sitzung von $KONTEXT_MAX Token.
+Opus: Auftrag in Pakete teilen oder Plan-Modus (Befunde statt ganzer Dateien).
+Was fertig ist, liegt im Worktree (ds/ds-worker.sh diff $name --stat)."
+  jq --arg t "$text" '.subtype = "zu_gross" | .is_error = true | .result = $t' "$1" > "$1.neu"
+  mv "$1.neu" "$1"
+  echo "ds-worker: ZU GROSS -- $2" >&2
+  return 6
+}
+
 laufe_etappen() {  # wie laufe, aber bei Etappenwechsel (Exit 4) frisch weiter
-  local prompt=$1 out=$2 rc etappe=1; shift 2
+  # Fortschritt = der Worktree-Diff hat sich in der Etappe geaendert. Ohne
+  # Fortschritt einmal Vorerkundung (Lagekarte), danach Exit 6 statt einer
+  # weiteren Etappe, die dasselbe noch einmal liest.
+  local prompt=$1 out=$2 rc etappe=1 vorher; shift 2
   while :; do
+    vorher=$(diff_stand)
     rc=0; laufe "$prompt" "$out" "$@" || rc=$?
     (( rc == 4 )) || return $rc
-    (( etappe < ETAPPEN_MAX )) || { echo "ds-worker: Etappengrenze $ETAPPEN_MAX erreicht" >&2; return 0; }
+    if (( etappe >= ETAPPEN_MAX )); then
+      zu_gross "$out" "Etappengrenze $ETAPPEN_MAX erreicht, Arbeit nicht fertig."; return
+    fi
     jq -c . "$out" >> "$ARBEIT/$name.laeufe.jsonl"   # Zwischenlauf fuer die Kostenmessung
+    if [[ $(diff_stand) == "$vorher" ]]; then
+      if [[ -e $ARBEIT/$name.lage.json || $VORERKUNDUNG == aus ]]; then   # schon versucht
+        zu_gross "$out" "Etappe $etappe endete ohne neue Aenderung im Worktree$(
+          [[ -s $ARBEIT/$name.lage.md ]] && echo ' trotz Lagekarte' ||
+          { [[ -e $ARBEIT/$name.lage.json ]] && echo ', Vorerkundung gescheitert'; })."; return
+      fi
+      echo "ds-worker: Etappe $etappe ohne Aenderung im Worktree -- Vorerkundung (Lagekarte) vor der naechsten" >&2
+      vorerkunden "$GRUND_PROMPT" ||
+        { zu_gross "$out" "Etappe $etappe ohne Aenderung, Vorerkundung gescheitert."; return; }
+    fi
     etappe=$(( etappe + 1 ))
     echo "ds-worker: Etappe $etappe -- Kontext ueber $KONTEXT_MAX, frische Sitzung" >&2
     staffelstab "$GRUND_PROMPT" "$etappe" > "$ARBEIT/$name.etappe.md"
@@ -335,12 +421,55 @@ laufe_etappen() {  # wie laufe, aber bei Etappenwechsel (Exit 4) frisch weiter
   done
 }
 
+lesebudget() {  # $1 Prompt-Datei -> Tabelle; stdout letzte Zeile: Token gesamt
+  DS_REPO=$REPO python3 "$REPO/ds/plan.py" budget "$1"
+}
+
+lage_weg() {  # Reste einer frueheren Vorerkundung gleichen Namens (neuer Lauf)
+  rm -f "$ARBEIT/$name".{lage.md,lage.md.unbrauchbar,lage.json,start.md,budget.md}
+}
+
+vorerkunden() {  # $1 Grund-Prompt -> Lagekarte $name.lage.md; GRUND_PROMPT = Auftrag + Lagekarte
+  # Nur-Lese-Sitzung im Worktree mit der Erkunder-Rolle, ohne Etappen (die
+  # Lagekarte ist ihre letzte Antwort). Scheitert sie, baut der Arbeiter ohne.
+  local grund=$1 json="$ARBEIT/$name.lage.json" lage="$ARBEIT/$name.lage.md"
+  local start="$ARBEIT/$name.start.md" rc=0 alt_modus=$MODUS alt_max=$KONTEXT_MAX fehlt
+  MODUS=lage; KONTEXT_MAX=999999999
+  rc=0; laufe "$grund" "$json" || rc=$?
+  MODUS=$alt_modus; KONTEXT_MAX=$alt_max
+  jq -c . "$json" >> "$ARBEIT/$name.laeufe.jsonl"   # zaehlt in tokens.py mit
+  jq -r '"--- Vorerkundung: \(.subtype), \(.num_turns) Zuege, \(.duration_ms/1000|floor) s"' "$json" >&2
+  (( rc == 0 )) || { echo "ds-worker: Vorerkundung abgebrochen (Exit $rc), weiter ohne Lagekarte" >&2; return 1; }
+  jq -r '.result // ""' "$json" > "$lage"
+  fehlt=$(for a in Fundstellen Reihenfolge; do grep -q "^## $a" "$lage" || echo "$a"; done)
+  if [[ -n $fehlt ]]; then
+    echo "ds-worker: Lagekarte ohne Abschnitt $(echo $fehlt) -- weiter ohne (siehe $lage)" >&2
+    mv "$lage" "$lage.unbrauchbar"; return 1
+  fi
+  echo "ds-worker: Lagekarte $(wc -l < "$lage") Zeilen: ds/arbeit/$name.lage.md" >&2
+  { cat "$grund"
+    printf '\n## Lagekarte (Vorerkundung, nur Fakten; der Auftrag oben gilt vor)\n\n'
+    sed 's/^## /### /' "$lage"
+    printf '\nBaue jetzt. Lege zuerst die Reihenfolge der Lagekarte als Aufgabenliste\n'
+    printf '(TodoWrite) an. Lies nur die Fundstellen (Read mit offset/limit), keine ganzen\n'
+    printf 'Dateien; Schnittstellen stehen oben. Erkunde nur nach, was dort fehlt.\n'
+  } > "$start"
+  GRUND_PROMPT=$start
+  echo "$start" > "$ARBEIT/$name.grund"
+}
+
 auswerten() {  # $1 JSON-Ergebnis des Laufs
   local json=$1
   jq -c . "$json" >> "$ARBEIT/$name.laeufe.jsonl"   # jeder Lauf, fuer die Kostenmessung
   jq -r '.result // "(kein Ergebnistext)"' "$json" > "$ARBEIT/$name.bericht.md"
   local etappen; etappen=$(grep -c '"subtype":"etappe"' "$ARBEIT/$name.laeufe.jsonl" || true)
   (( etappen == 0 )) || echo "--- Etappen (frische Sitzung bei grossem Kontext): $etappen" >> "$ARBEIT/$name.bericht.md"
+  { [[ -s $ARBEIT/$name.budget.md ]] && tail -n1 "$ARBEIT/$name.budget.md"
+    if [[ -s $ARBEIT/$name.lage.md ]]; then
+      echo "--- Vorerkundung: ja, Lagekarte $(wc -l < "$ARBEIT/$name.lage.md") Zeilen (ds/arbeit/$name.lage.md; Luecken dort fuer Opus)"
+    elif [[ -e $ARBEIT/$name.lage.json ]]; then
+      echo "--- Vorerkundung: gescheitert, gebaut ohne Lagekarte"
+    fi; } >> "$ARBEIT/$name.bericht.md"
   cat "$ARBEIT/$name.bericht.md"
   echo
   jq -r '"--- Lauf: \(.subtype), \(.num_turns) Zuege, \(.duration_ms/1000|floor) s, " +
@@ -380,6 +509,42 @@ pruefen() {  # $1 Verzeichnis; Befehle: ```-Block unter "## Abnahme" im Auftrag
 zeige_diff() {
   git -C "$WT" add -A -N .   # neue Dateien im Diff sichtbar machen
   git -C "$WT" --no-pager diff HEAD "$@"   # HEAD = Basis, nur Arbeit des Arbeiters
+}
+
+uebernehmen_einzeln() {  # je geaenderter Datei: anwenden, kopieren, 3way; Bericht; Exit 1 = Rest offen
+  local st f p fehler erg rest=0 n=0
+  echo "--- Ganzer Patch passt nicht sauber; Datei fuer Datei:"
+  git -C "$WT" add -A -N .
+  while IFS=$'\t' read -r st f; do
+    n=$(( n + 1 ))
+    p=$(mktemp); fehler=$(mktemp)
+    git -C "$WT" --no-pager diff --binary --no-renames HEAD -- "$f" > "$p"
+    if git -C "$REPO" apply --reverse --check "$p" 2>/dev/null; then
+      erg="schon da     (Haupt-Checkout hat den Stand bereits)"
+    elif git -C "$REPO" apply --check "$p" 2>/dev/null; then
+      git -C "$REPO" apply "$p"; erg="ok"
+    elif [[ $st == A && -e $REPO/$f ]]; then
+      if cmp -s "$WT/$f" "$REPO/$f"; then erg="schon da     (neue Datei gleich vorhanden)"
+      else erg="KONFLIKT     neue Datei existiert im Haupt-Checkout mit anderem Inhalt"; rest=1; fi
+    elif [[ $st == A ]]; then
+      mkdir -p "$(dirname "$REPO/$f")"; cp "$WT/$f" "$REPO/$f"; erg="kopiert      (neue Datei)"
+    else
+      # --3way braucht Index = Arbeitsstand der Datei (Lehre runden-log):
+      # nur diese eine Datei stagen, damit fremde Aenderungen erhalten bleiben.
+      git -C "$REPO" ls-files --error-unmatch -- "$f" >/dev/null 2>&1 && git -C "$REPO" add -- "$f"
+      if git -C "$REPO" apply --3way "$p" 2> "$fehler"; then
+        erg="3way         zusammengefuehrt (Datei ist jetzt gestagt)"
+      elif [[ -n $(git -C "$REPO" diff --name-only --diff-filter=U -- "$f") ]]; then
+        erg="KONFLIKT     Marker in der Datei (<<<<<<<), beide Seiten pruefen; gestagt"; rest=1
+      else
+        erg="FEHLT        $(grep -m1 -v '^$' "$fehler")"; rest=1
+      fi
+    fi
+    printf '    %-1s %-48s %s\n' "$st" "$f" "$erg"
+    rm -f "$p" "$fehler"
+  done < <(git -C "$WT" diff --name-status --no-renames HEAD)
+  echo "--- $n Dateien; $( (( rest )) && echo 'Rest offen (KONFLIKT/FEHLT oben)' || echo 'alle uebernommen')"
+  return $rest
 }
 
 auftrag_pruefen() {  # $1 Auftrag, $2 Vorlage: Platzhalterzeilen offen? Abnahme da?
@@ -439,10 +604,20 @@ case $cmd in
 start)
   auftrag="$ARBEIT/$name.auftrag.md"
   auftrag_pruefen "$auftrag" "$REPO/ds/auftrag-vorlage.md"
+  lage_weg
+  budget_ausgabe=$(lesebudget "$auftrag" 2>&1) || budget_ausgabe=$'Lesebudget nicht ermittelbar\n0'
+  lese=$(tail -n1 <<<"$budget_ausgabe"); [[ $lese =~ ^[0-9]+$ ]] || lese=0
+  sed '$d' <<<"$budget_ausgabe" > "$ARBEIT/$name.budget.md"
   worktree_anlegen
   echo "$auftrag" > "$ARBEIT/$name.grund"
   GRUND_PROMPT=$auftrag
-  rc=0; laufe_etappen "$auftrag" "$ARBEIT/$name.json" || rc=$?
+  echo "--- Lesebudget (Kern): ~$(( lese / 1000 ))k Token (Vorerkundung ab $(( LESEBUDGET / 1000 ))k," \
+       "Etappe ab $(( KONTEXT_MAX / 1000 ))k; Tabelle ds/arbeit/$name.budget.md)" >> "$ARBEIT/$name.budget.md"
+  if [[ $VORERKUNDUNG == immer ]] || { [[ $VORERKUNDUNG == auto ]] && (( lese > LESEBUDGET )); }; then
+    echo "ds-worker: Lesebudget (Kern) ~$(( lese / 1000 ))k Token ueber $(( LESEBUDGET / 1000 ))k -- Vorerkundung" >&2
+    vorerkunden "$auftrag" || true
+  fi
+  rc=0; laufe_etappen "$GRUND_PROMPT" "$ARBEIT/$name.json" || rc=$?
   auswerten "$ARBEIT/$name.json"
   echo $rc > "$ARBEIT/$name.rc"
   exit $rc
@@ -474,6 +649,21 @@ plan)
   exit $rc
   ;;
 form) plan_py pruefen "$name" ;;
+budget)
+  # Fuer Opus beim Schreiben des Auftrags: was liest der Arbeiter? Ueber der
+  # Grenze erkundet start zuerst vor (Lagekarte); besser: Auftrag teilen.
+  auftrag="$ARBEIT/$name.auftrag.md"
+  [[ -r $auftrag ]] || { echo "$auftrag fehlt" >&2; exit 1; }
+  aus=$(lesebudget "$auftrag"); lese=$(tail -n1 <<<"$aus")
+  sed '$d' <<<"$aus"
+  if (( lese > KONTEXT_MAX )); then
+    echo "=> Kern ueber der Etappengrenze ($(( KONTEXT_MAX / 1000 ))k): teilen oder Plan-Modus; start erkundet sonst vor."
+  elif (( lese > LESEBUDGET )); then
+    echo "=> Kern ueber $(( LESEBUDGET / 1000 ))k: start erkundet zuerst vor (Lagekarte, ~5-10 min). Grosse Kern-Dateien mit datei:zeile eingrenzen oder teilen."
+  else
+    echo "=> passt: Kern unter $(( LESEBUDGET / 1000 ))k, keine Vorerkundung."
+  fi
+  ;;
 bauen)
   # Bauphase: frische Sitzung (kein --resume: die Planungssitzung ist schon
   # gross und wuerde sofort zusammengefasst). Prompt = Auftrag + Plan + Freigabe.
@@ -492,6 +682,7 @@ bauen)
     sed 's/^## /### /' "$frei"
     printf '\nBaue jetzt. Starte bei den Befunden des Plans; erkunde nur nach, was dort fehlt.\n'
   } > "$bau"
+  lage_weg
   worktree_anlegen
   echo "$bau" > "$ARBEIT/$name.grund"
   GRUND_PROMPT=$bau
@@ -534,16 +725,31 @@ nacharbeit)
 diff) zeige_diff "${@:3}" ;;
 tokens) tokens ;;
 uebernehmen)
-  # Erst ohne Index anwenden (Staging des Nutzers bleibt unberuehrt); nur bei
-  # Konflikt auf --3way ausweichen, das dann auch den Index setzt.
+  # Erst als Ganzes ohne Index (Staging des Nutzers bleibt unberuehrt). Passt
+  # das nicht (paralleler Auftrag, dirty Baum, neue Datei schon da), Datei fuer
+  # Datei mit Bericht -- vorher machte Opus das jedes Mal von Hand
+  # (fuchs-client, runden-log, p4-vertrag, menue-ring).
+  [[ -d $WT ]] || { echo "Worktree $WT fehlt" >&2; exit 1; }
+  rest=0
   patch=$(mktemp); zeige_diff --binary > "$patch"
-  git -C "$REPO" apply "$patch" 2>/dev/null || {
-    echo "Hinweis: Konflikt, wende mit --3way an (setzt den Index)." >&2
-    git -C "$REPO" apply --3way "$patch"; }
-  rm -f "$patch"
-  worktree_weg
-  echo "uebernommen, nicht committet: git -C $REPO status"
+  if git -C "$REPO" apply --check "$patch" 2>/dev/null; then
+    git -C "$REPO" apply "$patch"; rm -f "$patch"
+    echo "--- uebernommen (ganzer Patch sauber):"; zeige_diff --stat | tail -n 40
+    worktree_weg
+  else
+    rm -f "$patch"
+    uebernehmen_einzeln || rest=$?
+    if (( rest )); then
+      echo "--- Worktree bleibt fuer den Rest: $WT"
+      echo "    Rest von Hand: ds/ds-worker.sh diff $name -- <datei>; Konfliktmarker loesen;"
+      echo "    danach ds/ds-worker.sh verwerfen $name"
+    else
+      worktree_weg
+    fi
+  fi
+  echo "nicht committet: git -C $REPO status"
   pruefen "$REPO" || echo "ds-worker: Abnahme im Haupt-Checkout ROT" >&2
+  exit $(( rest ? 1 : 0 ))
   ;;
 pruefen)
   if [[ ${3:-} == --haupt ]]; then pruefen "$REPO"; else pruefen "$WT"; fi
@@ -564,5 +770,5 @@ verwerfen)
   worktree_weg
   echo "verworfen"
   ;;
-*) sed -n 6,19p "$0"; exit 2 ;;
+*) sed -n 6,20p "$0"; exit 2 ;;
 esac

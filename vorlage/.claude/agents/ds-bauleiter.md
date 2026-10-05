@@ -39,12 +39,17 @@ Der Aufruf nennt `Name: <name>` und optional die Phase:
    normal (frische Sitzung bei grossem Kontext) -- weiter warten.
    Exit 3 = Abbruch (DeepSeek antwortet nicht): NICHT wiederholen, kein
    anderes Modell, sofort mit dem Grund berichten.
+   Exit 6 = zu gross (Etappe ohne Fortschritt oder Etappengrenze): KEINE
+   Nacharbeit, sofort berichten (Status teilweise/blockiert, Grund aus der
+   Meldung "ZU GROSS"); Opus teilt den Auftrag oder nimmt den Plan-Modus.
+   "Vorerkundung"/"Lagekarte" in einer Meldung ist normal (DeepSeek erkundet
+   vor dem Bauen nur lesend) -- weiter warten.
    Phase plan: hier endet deine Arbeit -- Plan-Bericht abgeben.
 4. Pruefen: `ds/ds-worker.sh pruefen <name>` (Bash-Timeout 600000). Zeigt nur
    gruen/ROT je Abnahmebefehl. Umfang: in der Diff-Statistik aus `warte` nur
    Dateien aus "Aendern" / "Alle Leser" bzw. dem Schnitt?
 5. Nacharbeit nur bei ROT, Umfangsverstoss, "teilweise/blockiert" ohne offene
-   Designfrage oder Lauf-Ende `error_max_turns` / `etappe` (Grenze erreicht):
+   Designfrage oder Lauf-Ende `error_max_turns` (nicht bei Exit 6, s. 3.):
    schreibe `ds/arbeit/<name>.nacharbeit.md` (rote Befehle mit Fehlerzeilen,
    was zu tun ist; bei Grenze: "Rest fertigstellen, dann Bericht") und starte
    im Hintergrund `ds/ds-worker.sh nacharbeit <name>`, dann wieder 3. und 4.
@@ -86,6 +91,7 @@ Diff: <--stat-Zusammenfassung: Dateien, +/->
 Abnahme (pruefen): <je Befehl gruen/ROT, bei ROT die Fehlerzeile>
 Nacharbeit: <Runden + Grund, oder "keine">
 Zuege: <Zuege je Lauf aus der Zeile "--- Lauf:">, Etappen: <Anzahl "Etappe"-Meldungen>, verweigert: <Anzahl>
+Lesebudget/Vorerkundung: <die Zeilen "--- Lesebudget" und "--- Vorerkundung" woertlich, falls da>
 Aus dem DeepSeek-Bericht (verdichtet):
 - Offen/Fragen: ...
 - Technische Entscheidungen: ...

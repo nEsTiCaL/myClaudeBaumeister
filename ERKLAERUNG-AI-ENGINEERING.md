@@ -69,9 +69,21 @@ bei Anthropic landet.
 - **Basis = Arbeitsstand, nicht HEAD:** uncommittete Änderungen und neue,
   unversionierte Dateien wandern als „ds-Basis“-Commit in den Zweig. `diff`
   und `uebernehmen` zeigen danach *nur* die Arbeit des Workers.
-- `uebernehmen` wendet den Patch ohne Index an (Staging des Nutzers bleibt),
-  fällt nur bei Konflikt auf `--3way` zurück und führt die Abnahme im
-  Haupt-Checkout erneut aus.
+- `uebernehmen` wendet den Patch ohne Index an (Staging des Nutzers bleibt)
+  und führt die Abnahme im Haupt-Checkout erneut aus. Passt der ganze Patch
+  nicht, geht es Datei für Datei mit Bericht je Datei:
+  - `ok`: sauber angewendet
+  - `schon da`: Stand bereits vorhanden
+  - `kopiert`: neue Datei
+  - `3way`: zusammengeführt, nur diese Datei wird gestagt, weil `--3way`
+    den Index braucht
+  - `KONFLIKT`: Marker gesetzt oder neue Datei mit anderem Inhalt vorhanden
+  - `FEHLT`
+
+  Bleibt ein Rest, bleibt auch der Worktree stehen, und der Befehl endet mit
+  Exit 1. Ein zweiter Aufruf nach der Handlösung meldet `schon da`. Vorher
+  löste Opus solche Fälle jedes Mal von Hand: Konflikt bei parallelen
+  Paketen, dirty Baum, `.uid` neuer Dateien.
 - Parallele Läufe funktionieren, wenn die Aufträge nach Dateien schneiden.
 
 ### Abnahme als Daten, nicht als Meinung
@@ -115,6 +127,57 @@ per Etappe beendete startet frisch mit Staffelstab. Bei DeepSeek ist großer
 Kontext billig (Cache-Lesen 0,003 $/Mio.); es geht um Verlässlichkeit, nicht
 um Kosten.
 
+### Lesebudget, Vorerkundung und Etappen ohne Fortschritt
+Ein Staffelstab hilft nur, wenn die Sitzung schon etwas gebaut oder notiert
+hat. Ein UI-Einbau (2026-10-05) zeigte den Fehlerfall: Etappe 1 las 21 Züge
+lang ganze Dateien (allein `main.gd` mit 3300 Zeilen ≈ 57k Token), endete bei
+110k ohne Edit, ohne Aufgabenliste und ohne Notiz. Etappe 2 bekam einen leeren
+Staffelstab und las alles noch einmal. Nach vier Etappen waren ~365k Token
+gelesen und keine Zeile gebaut. Drei Gegenmaßnahmen greifen ineinander:
+
+- **Lesebudget vor dem Start** (`ds/plan.py budget`, `ds-worker.sh budget
+  <name>`): Die Token der im Auftrag genannten Dateien werden geschätzt, als
+  würden sie ganz gelesen: (Bytes + 7·Zeilen) / 2,66. Die 7 Zeichen sind die
+  Zeilennummer, die Read voranstellt. Der Faktor 2,66 ist der Median aus 404
+  Read-Ergebnissen echter Läufe (10–90 %: 2,2–2,9); ein Tokenizer ist dafür
+  nicht nötig. Zum Kern zählen nur Dateien aus Ändern/LÖSCHEN/Lies
+  zuerst/Einstiegsstellen. Ein Abgleich mit allen bisherigen Aufträgen
+  zeigte: Die Summe aller nur erwähnten Dateien sagt nichts voraus. Fast
+  jeder Auftrag liegt über 55k, und Arbeiter lesen davon meist nur Teile. Der
+  Kern trennt dagegen gut: Alle Läufe seit Einführung der Etappen mit Kern
+  ≥ 55k hatten Etappen, darunter nur einzelne.
+- **Vorerkundung** (Planer im Baumodus): Liegt der Kern über
+  `DS_LESEBUDGET` (Standard `DS_KONTEXT`/2), erkundet zuerst eine
+  Nur-Lese-Sitzung mit Planer-Werkzeugen und schreibt eine **Lagekarte**:
+  Fundstellen `datei:von-bis`, Schnittstellen (Signaturen, damit fremde
+  Dateien nicht gelesen werden müssen), Alle Leser, Reihenfolge, Lücken.
+  Anders als im Plan-Modus trifft sie keine Entscheidungen, die stehen
+  schon im klassischen Auftrag. Darum muss Opus nichts freigeben. Gebaut
+  wird mit Auftrag + Lagekarte in einer frischen Sitzung, die nur noch die
+  Fundstellen liest. Die Lagekarte ist Teil des Grund-Prompts und damit
+  auch jedes Staffelstabs.
+- **Etappe ohne Fortschritt**: Ändert sich der Worktree-Diff in einer
+  Etappe nicht, startet keine gleiche Etappe mehr. Beim ersten Mal folgt
+  eine Vorerkundung, falls es noch keine gab, sonst endet der Lauf mit
+  **Exit 6 (zu groß)**. Die Etappengrenze endet ebenfalls mit Exit 6; bis
+  2026-10-05 meldete sie Exit 0. Der Bauleiter macht bei 6 keine
+  Nacharbeit, Opus teilt oder wechselt in den Plan-Modus.
+- **Merk-Hook** (`ds/arbeiter-merker.sh`, PostToolUse auf Read/Grep/Glob):
+  Nach 12 Lese-Schritten ohne Aufgabenliste und ab 60 % der Etappengrenze
+  hängt er eine Erinnerung an das Werkzeug-Ergebnis. Der Arbeiter soll
+  dann die Aufgabenliste mit Fundstellen per TodoWrite anlegen oder
+  aktualisieren, also seinen Staffelstab. Die Regel stand vorher nur im
+  Rollen-Prompt und wurde ignoriert (Prompt → Hook). Nachgespielt am
+  Transkript des UI-Einbaus hätte er bei 49k Kontext angeschlagen.
+
+Nebenbefund: Die Ersatz-Ergebnisse von Etappen und Watchdog-Abbrüchen
+zählten **0 Ausgabe-Token**. Im Stream tragen die assistant-Nachrichten
+`output_tokens: 0`, die echte Zahl steht nur in den `message_delta`-
+Ereignissen, und die wurden vorher herausgefiltert. Seit 2026-10-05 bleiben
+sie im Protokoll und werden summiert. Ältere Messungen mit Etappen
+unterschätzen Ausgabe und Direkt-Schätzung, die Ersparnis ist dort also
+eher zu niedrig.
+
 ### Async ohne Polling-Kosten
 Der Bauleiter startet `start` im Hintergrund und ruft `warte` (blockiert bis
 570 s, unter dem 10-min-Bash-Limit) auf. Ein früherer Bauleiter nutzte
@@ -141,6 +204,7 @@ Leerlauf-Schleifen, aber vermeidbare Züge. Ursachen und Gegenmittel:
 |---|---|
 | Viele kleine Edits, erster Test erst nach ~100 Zügen, dann Rot-Welle | **PostToolUse-Hook** `ds/arbeiter-pruef.sh`: prüft jede editierte Datei (`nach_edit` in `ds/projekt.sh`, z. B. `go vet`, Parse-Check) und hängt Fehler als `additionalContext` an dasselbe Tool-Ergebnis |
 | 4–12 abgelehnte Bash-Befehle je Lauf, je 1–5 Umformulierungen (`&&`, `cd`, Python) | Rollen-Prompt nennt die Freigaben und verbietet Umformulieren |
+| Liest Dateien ganz, keine Aufgabenliste → leerer Staffelstab bei der Etappe | **PostToolUse-Hook** `ds/arbeiter-merker.sh` auf Read/Grep/Glob: verlangt TodoWrite mit Fundstellen (nach 12 Lese-Schritten, ab 60 % der Etappengrenze) |
 | `cd`-Irrwege, absolute Pfade | Rollen-Prompt: cwd = Worktree-Wurzel, relative Pfade |
 | nur 15–41 % Antworten mit mehreren Tool-Aufrufen | Rollen-Prompt: unabhängige Such-/Leseschritte bündeln |
 | Startkontext 21k je Zug (Schemata aller Tools, Nutzer-Settings) | `--tools` + `--setting-sources project,local` → 6,4k |
@@ -339,12 +403,13 @@ Projekt (Einrichtung: README.md).
 | Datei im Projekt | Zweck |
 |---|---|
 | `.claude/agents/ds-bauleiter.md` | Subagent: Rolle, Ablauf, Berichtsformat, Hook-Bindung |
-| `ds/ds-worker.sh` | start/plan/form/bauen/teilen/nacharbeit/warte/pruefen/diff/uebernehmen/verwerfen/tokens; Watchdog und Etappen |
-| `ds/plan.py` | Plan-Modus: Formprüfung, Paketzahl, Teilen in Paket-Aufträge |
+| `ds/ds-worker.sh` | start/budget/plan/form/bauen/teilen/nacharbeit/warte/pruefen/diff/uebernehmen/verwerfen/tokens; Watchdog, Etappen, Vorerkundung |
+| `ds/plan.py` | Plan-Modus: Formprüfung, Paketzahl, Teilen in Paket-Aufträge; Lesebudget |
 | `ds/plan-vorlage.md` | Kurzauftrag im Plan-Modus (Projektdatei) |
 | `ds/projekt.sh` | **einzige Projektanpassung**: Test-Freigaben, Read-only-Pfade, Kopien, Fehlermuster, `nach_edit` |
 | `ds/bauleiter-sperre.sh` | PreToolUse-Hook des Bauleiters + Selbsttest |
 | `ds/arbeiter-pruef.sh` | PostToolUse-Hook des Workers: Prüfung nach jedem Edit |
+| `ds/arbeiter-merker.sh` | PostToolUse-Hook des Workers: Aufgabenliste (Staffelstab) einfordern + Selbsttest |
 | `ds/auftrag-vorlage.md` | Struktur des Auftrags an DeepSeek |
 | `ds/tokens.py` | Kosten je Ebene + Ersparnis-Schätzung |
 | `ds/LEHREN.md` | Lernprotokoll |

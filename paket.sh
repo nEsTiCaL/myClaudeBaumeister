@@ -9,7 +9,8 @@ if grep -rn -e 'EnteEnteFuchs' -e 'memory/ops_' -e '/mnt/' "$MODUL/vorlage" "$MO
   echo "paket: projektspezifische Stellen (oben) -- neutral formulieren" >&2; exit 1
 fi
 bash "$MODUL/vorlage/ds/bauleiter-sperre.sh" --test >/dev/null
-for f in ds-worker.sh arbeiter-pruef.sh; do bash -n "$MODUL/vorlage/ds/$f"; done
+bash "$MODUL/vorlage/ds/arbeiter-merker.sh" --test >/dev/null
+for f in ds-worker.sh arbeiter-pruef.sh arbeiter-merker.sh; do bash -n "$MODUL/vorlage/ds/$f"; done
 bash -n "$MODUL/installieren.sh"
 python3 -c 'import ast, sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]' \
   "$MODUL/vorlage/ds/tokens.py" "$MODUL/vorlage/ds/plan.py"

@@ -84,5 +84,10 @@ den Plan in bis zu vier Pakete.
 - Wird DeepSeeks „Gedächtnis“ zu voll, macht ein frischer DeepSeek weiter
   und bekommt den Zettel vollständig mit (Etappe). So geht beim Aufräumen
   des Gedächtnisses keine Entscheidung verloren.
+- Muss DeepSeek für einen Auftrag sehr viel lesen, schaut erst ein
+  „Erkunder“ nach und schreibt eine Lagekarte: wo genau im Code was steht.
+  Der Bauer liest dann nur noch diese Stellen. Kommt trotzdem nichts voran,
+  bricht das Werkzeug ab und sagt „zu groß – teilen“, statt im Kreis zu
+  laufen. Wie viel ein Auftrag zu lesen hat, zeigt `ds/ds-worker.sh budget <name>`.
 - Von Hand geht alles auch: `ds/ds-worker.sh` ohne Argumente zeigt die Befehle.
 - Wer wissen will, *warum* das so gebaut ist: `ERKLAERUNG-AI-ENGINEERING.md`.
