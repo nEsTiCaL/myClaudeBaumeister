@@ -19,6 +19,8 @@ freigibt; danach baut DeepSeek, bei Bedarf in mehreren Paketen.
 installieren.sh          installiert/aktualisiert den Bauleiter in einem Projekt
 paket.sh                 baut dist/bauleiter.tar.gz zum Weitergeben
 CLAUDE-baustein.md       Abschnitt für die CLAUDE.md des Projekts (Kontext für Opus)
+karte/                   ds/karte: Struktur aus dem Syntaxbaum (Go, tree-sitter), wird
+                         beim Installieren gebaut; Tests: cd karte && go test ./...
 vorlage/                 was ins Projekt kopiert wird:
   .claude/agents/ds-bauleiter.md   der Subagent (Haiku) inkl. Sperr-Hook
   ds/ds-worker.sh                  Werkzeug: start/budget/plan/bauen/teilen/warte/pruefen/nacharbeit/diff/uebernehmen/tokens
@@ -37,6 +39,9 @@ vorlage/                 was ins Projekt kopiert wird:
 
 - Linux (macOS nur mit GNU coreutils und bash ≥ 4.4)
 - `git`, `jq`, `curl`, `python3`, `pgrep`, [Claude Code](https://claude.com/claude-code) (`claude`)
+- optional für `ds/karte`: Go ≥ 1.24 und ein C-Compiler (Grammatiken sind C). Der
+  erste Build lädt die Go-Module. Ein mit `paket.sh` gebautes Archiv enthält das
+  Binary schon (linux).
 - DeepSeek-API-Schlüssel (platform.deepseek.com)
 - das Zielprojekt ist ein git-Repository mit Tests, die per Befehl laufen
 

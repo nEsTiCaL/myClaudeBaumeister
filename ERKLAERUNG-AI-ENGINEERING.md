@@ -259,6 +259,71 @@ Gemessen (Rückspiel tempo-v7, Stand vor dem Original-Commit, 2026-10-04):
   erkunden müsste (20 von 38 Läufen hatten über 0,30 $ Vorbereitung). Kennt
   Opus die Stellen schon (13 Läufe unter 0,15 $), ist der klassische Weg billiger.
 
+### Karte: Struktur aus dem Syntaxbaum statt Lesen (`ds/karte`)
+Die Vorbereitung durch Opus (Fundstellen, „Alle Leser“) war mit 37 % der
+größte Kostenblock der Delegation. Den größten Teil davon kann ein Syntaxbaum
+beantworten, ohne dass ein Modell Code liest. `ds/karte` ist ein Go-Binary
+mit tree-sitter. Die Abfragen sind `.scm`-Queries, übernommen aus dem
+Stratum-Indexer und an die offiziellen Grammatiken angepasst. Es kennt Go,
+GDScript und Python. Ein Lauf über ~130 Dateien dauert 0,4 s. Opus stellt
+damit drei Fragen:
+
+| Frage | Befehl | Ersetzt |
+|---|---|---|
+| Was gibt es wo? | `dateien`, `gliederung` | Dateien öffnen, um sich zu orientieren |
+| Wo genau? | `symbol` | `datei:zeile` per Read suchen |
+| Wer hängt davon ab? | `leser` | grep + Read jeder Fundstelle |
+
+Beispiel: Eine Datei mit 3371 Zeilen (≈ 57k Token) hat eine Gliederung von 159
+Zeilen (≈ 3k Token).
+
+**Güte ist ausgewiesen.** Definitionen, Zeilenbereiche und aufgelöste Importe
+sind exakt. Bei `leser` ordnet die Karte jeden Treffer seiner Definition nach
+den Regeln der Sprache zu. Go: Unqualifiziert geht nur im selben Paket,
+qualifiziert über den aufgelösten Import-Alias. GDScript: Unqualifiziert geht
+nur in der Datei selbst oder per `extends`, qualifiziert über
+`const X = preload(...)`. Treffer, die zu nichts im Repo gehören (`flag.Parse`
+statt `arena.Parse`), Feldzugriffe auf Werten und gleichnamige Deklarationen
+blendet sie aus und zählt sie nur. Ohne Typprüfung bleibt `wert.methode()` ein
+Hinweis (`?`). Einen Namen als String (`call_deferred("f")`) markiert sie als
+dynamisch, Treffer in Szenen und Doku als „Andere Datei“. Die Karte ist damit
+genauer als grep, aber kein Typprüfer.
+
+Gemessen an `arena.Parse` in einem Go-Server: grep liefert 11 Aufrufe, davon
+3 fremde (`flag.Parse`, `time.Parse`) und 3 eines anderen Pakets. `karte leser`
+liefert die 5 richtigen und nennt die übrigen als ausgeblendet.
+
+**Messung:** `ds/tokens.py --karte` stellt die Läufe ohne und mit Karte
+gegenüber. Basis (61 Läufe ohne Karte, EnteEnteFuchs): Opus liest kaum ganze
+Dateien (≈ 2k Token Code je Lauf), sucht aber 5,2-mal per grep. Teuer ist
+nicht das Gelesene, sondern der Zug: 6,8 Erkundungszüge je Lauf ≈ 0,39 $,
+weil jeder Zug den Sitzungskontext neu liest. Die Karte hilft, wenn diese
+Zahl sinkt, also `leser`/`symbol` mehrere grep-und-sed-Runden ersetzen.
+Wenn `gliederung` vor ganzem Lesen steht, ist das zweitrangig.
+
+**Von selbst statt gelernt (Hook `karte-hinweis.sh`):** In den ersten vier
+Läufen mit installierter Karte hat Opus sie kein einziges Mal aufgerufen: Es
+erkundet, bevor es an Delegation denkt, und neue Werkzeuge muss jede Sitzung
+neu entdecken. Deshalb kommt die Karte jetzt zu Opus. Ein PostToolUse-Hook
+erkennt nach jedem grep/sed/Read die berührten Code-Dateien und gesuchten
+Namen. Er hängt im selben Zug an, was grep nicht liefert:
+- die Funktionsgrenzen jeder neu berührten Datei (`karte index`),
+- zu gesuchten Namen Definition und Verwendungen, gruppiert nach umschließender
+  Funktion mit Bereich (`karte verwendung`).
+
+So wird der nächste `sed -n` gezielt, statt einen Bereich zu raten, und das
+grep nach der Definition entfällt. Je Sitzung liefert der Hook jede Datei nur
+einmal und nach einer Änderung neu. Simuliert an 65 Sitzungen: ~4k Token je
+Sitzung, und bei 47 % der Lesezugriffe lag die Gliederung schon vor. Ob das
+Erkundungszüge spart, zeigt `ds/tokens.py --karte` (Spalten Hinweise und
+„in Grenzen“).
+
+**Grammatiken:** Go und Python kommen als Go-Module von tree-sitter. Das
+GDScript-Modul ist upstream nicht nutzbar, weil sein Modulpfad falsch ist. Die
+C-Quellen liegen deshalb unter `karte/grammatik/gdscript/` (Herkunft, Stand,
+`aktualisieren.sh`). Neue Sprachen brauchen eine Grammatik, `symbole.scm` und
+`importe.scm` sowie einen Eintrag in `karte/sprache.go`.
+
 ## 4. Warum Haiku als Bauleiter (und nicht Sonnet oder gar keiner)
 
 Gemessen an einem Lauf mit +996 Zeilen:
@@ -413,4 +478,5 @@ Projekt (Einrichtung: README.md).
 | `ds/auftrag-vorlage.md` | Struktur des Auftrags an DeepSeek |
 | `ds/tokens.py` | Kosten je Ebene + Ersparnis-Schätzung |
 | `ds/LEHREN.md` | Lernprotokoll |
+| `ds/karte` | Struktur für Opus: Übersicht, Gliederung, Definition, Leser (Go-Binary aus `karte/`, optional) |
 | `CLAUDE-baustein.md` (Modul) | Abschnitt für die Projekt-CLAUDE.md (Trigger `Bauleiter:` / `Bauleiter-Plan:`, Wegwahl, Auftrags-Regeln) |

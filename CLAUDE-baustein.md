@@ -15,6 +15,23 @@ DeepSeek-Zug; DeepSeek braucht etwa 2-3x so viele Zuege wie du selbst.
   gross (> ~100 Zuege): `Bauleiter-Plan:` -- DeepSeek erkundet und plant.
 - Sehr gross / mehrsprachiger Vertrag: `Bauleiter-Plan:`, im Plan schneiden lassen.
 
+### Struktur ohne Lesen: `ds/karte`
+Nach jedem grep/sed/Read auf Code haengt der Hook `ds/karte-hinweis.sh`
+die Funktionsgrenzen neu beruehrter Dateien und zu gesuchten Namen Definition
++ Verwendungen (je Funktion mit Bereich) an: damit gezielt `sed -n von,bisp`.
+Fundstellen und Leser zuerst mit `ds/karte` holen statt Dateien zu lesen
+(Syntaxbaum: Go, GDScript, Python; < 1 s; freigegeben, auch im Plan-Modus).
+Ein `leser`-Aufruf statt mehrerer grep/sed-Runden: jeder Zug liest den
+ganzen Sitzungskontext neu (gemessen: 6,8 Erkundungszuege ≈ 0,39 $ je Lauf).
+- `ds/karte dateien [pfad]`: je Verzeichnis bzw. Datei Zeilen, ~Token, Importe
+- `ds/karte gliederung <pfad>`: Symbole mit Zeilenbereich, wer importiert wen
+- `ds/karte symbol <ziel>`: `datei:von-bis` fuer Einstiegsstellen
+- `ds/karte leser <ziel>`: Aufrufe/Referenzen der Definition zugeordnet (Paket,
+  preload, extends); fremde Gleichnamige ausgeblendet. `?` = Methode auf Wert
+  (Typ unbekannt), "Text" = Name als String (dynamisch), "Andere Datei" =
+  Szenen/Doku. Ziel: `name`, `Typ.name`, `paket.name`, `datei:name`.
+Exakt sind Definitionen, Zeilen und Importe; `?` und "Text" sind Hinweise.
+
 ### `Bauleiter:` (klassisch)
 Auftrag (aus deinem vorhandenen Kontext, nichts neu lesen): schreibe ihn
 selbst als `ds/arbeit/<name>.auftrag.md` nach `ds/auftrag-vorlage.md`
@@ -23,7 +40,7 @@ selbst als `ds/arbeit/<name>.auftrag.md` nach `ds/auftrag-vorlage.md`
 Nur hinein, was DeepSeek nicht selbst findet: Entscheidungen, Zahlen,
 Formeln, Reihenfolgen, Grenzen, Einstiegsstellen `datei:zeile`.
 - "Alle Leser": bei geaenderter Signatur/Codec/Raster/Flag-Bedeutung jede
-  Fundstelle (grep), auch Tests, Tools, andere Sprachen.
+  Fundstelle (`ds/karte leser`, sonst grep), auch Tests, Tools, andere Sprachen.
 - "Randfaelle": Wiederhol-, Grenz-, Leerfall je als Testfall; "Verhalten
   unveraendert" nennt den Test, der es festnagelt.
 - Abnahmebefehle als ```sh-Block, je Zeile ein Befehl aus der Repo-Wurzel,
@@ -46,8 +63,8 @@ Formeln, Reihenfolgen, Grenzen, Einstiegsstellen `datei:zeile`.
    offene Fragen und Schnitt.
 3. `ds/arbeit/<name>.plan.md` selbst lesen (nicht zusammenfassen lassen).
    Pruefe: Entscheidungen (jede bestaetigen oder korrigieren), offene Fragen,
-   Vollstaendigkeit "Alle Leser" (bei Zweifel den genannten grep selbst
-   laufen lassen), Randfaelle mit Test, Schnitt (hoechstens 4 Pakete).
+   Vollstaendigkeit "Alle Leser" (bei Zweifel `ds/karte leser <ziel>` oder den
+   genannten grep selbst laufen lassen), Randfaelle mit Test, Schnitt (hoechstens 4 Pakete).
 4. Freigabe `ds/arbeit/<name>.freigabe.md` -- nur Abweichungen, z. B.:
    ```
    - Entscheidung 2: NEIN -- stattdessen ... (Grund)

@@ -26,6 +26,10 @@ DS_FEHLERMUSTER=()
 # Satz fuer die Arbeiter-Rolle: wo stehen die Bau-/Testbefehle?
 DS_HINWEIS_PRUEFEN='Pruefe deine Arbeit mit den Befehlen unter "## Abnahme" im Auftrag.'
 
+# PostToolUse-Hook ds/karte-hinweis.sh (Funktionsgrenzen + Verwendungen nach
+# Bash/Grep/Read): an (Standard) oder aus.
+DS_KARTE_HINWEIS=an   # aus: ds/karte-hinweis.sh liefert nichts
+
 # Wird vor jeder Abnahme mit dem Zielverzeichnis als $1 aufgerufen, z. B. um
 # generierte Dateien zu kopieren. Standard: nichts tun.
 vor_pruefen() { :; }
