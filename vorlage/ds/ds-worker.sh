@@ -18,21 +18,37 @@
 #   ds/ds-worker.sh pruefen    <name> [--haupt]  # Abnahmebefehle des Auftrags, nur gruen/ROT
 #   ds/ds-worker.sh warte      <name>   # blockiert bis Laufende (max DS_WARTE s, 570)
 #
-# Zugang: ~/.config/deepseek/env mit DEEPSEEK_API_KEY=... (nie ins Repo).
-# DS_MODEL ueberschreibt das Modell (Standard deepseek-flash).
+# Backend (Werkzeugwechsel): DS_BACKEND=deepseek (Standard) | lokal.
+#   deepseek  api.deepseek.com/anthropic; Zugang ~/.config/deepseek/env mit
+#             DEEPSEEK_API_KEY=... (nie ins Repo). Modell deepseek-flash.
+#   lokal     eigener Server mit Anthropic-Messages-API ohne Kosten je Token
+#             (vLLM >= 0.11, llama.cpp llama-server, Ollama >= 0.14):
+#             DS_BASE_URL (Pflicht, ohne /v1), DS_MODEL (sonst das einzige
+#             Modell aus /v1/models), DS_AUTH_TOKEN (Standard "lokal").
+#             Eigenes Konfig-Verzeichnis (DS_CONFIG_DIR, Standard ds/arbeit/
+#             claude-home): keine Anthropic-Anmeldung im Arbeiter.
+# Einstellungen auch in ~/.config/bauleiter/env (je Rechner, KEY=wert);
+# Umgebungsvariablen gehen vor. DS_CLAUDE = claude-Programm (Standard claude).
+# DS_MODEL ueberschreibt das Modell.
 # Abbruch (Exit 3): ein Modell kann haengen und nur SSE-Keep-alives schicken,
-# dann greift kein Timeout. Vorabprobe: erstes Token binnen DS_PROBE s (45).
-# Watchdog: still beim Warten auf die API DS_API_STILL s (90), waehrend ein
-# Werkzeug laeuft DS_STILL s (300), gesamt DS_MAX s (3600).
-# Lage: https://status.deepseek.com
+# dann greift kein Timeout. Vorabprobe: erstes Token binnen DS_PROBE s (45,
+# lokal 180: Kaltstart); lokal prueft sie vorher, dass DS_MODEL geladen ist.
+# Watchdog: still beim Warten auf die API DS_API_STILL s (90, lokal 300),
+# waehrend ein Werkzeug laeuft DS_STILL s (300), gesamt DS_MAX s (3600).
+# Lage: https://status.deepseek.com bzw. der lokale Server (/metrics)
 # Zuege: Notbremse --max-turns DS_ZUEGE_MAX (250), Richtwert im Rollen-Prompt
 # DS_ZUEGE_RICHT (150). DS_EFFORT (low|medium|high|max) setzt --effort, sonst
 # Modellstandard -- fuer A/B-Messungen. Nach jedem Edit prueft der Hook
 # ds/arbeiter-pruef.sh die Datei (nach_edit in ds/projekt.sh).
-# Etappen statt Compaction: waechst der Kontext ueber DS_KONTEXT Token (110000),
+# Etappen statt Compaction: waechst der Kontext ueber DS_KONTEXT Token (110000,
+# lokal 80000: Claude Code kennt das Fenster eines lokalen Modells nicht),
 # endet die Sitzung an der naechsten Werkzeuggrenze und eine frische Sitzung
 # macht weiter (Staffelstab: Auftrag/Plan/Freigabe woertlich, Diff-Stand,
-# Aufgabenliste); hoechstens DS_ETAPPEN (4) Etappen je Lauf. Grund: Claude Code
+# Aufgabenliste .ds/aufgaben.md im Worktree); hoechstens DS_ETAPPEN (4) Etappen je Lauf.
+# Aufgabenliste als Datei statt TodoWrite: Claude Code 2.1.29x hat TodoWrite
+# headless durch TaskCreate/TaskUpdate ersetzt, das Werkzeug fiel still weg.
+# Die Datei haengt an keinem Werkzeugnamen, jedes Modell kann sie schreiben,
+# und sie liegt auch nach einem Watchdog-Abbruch auf der Platte. Grund: Claude Code
 # fasst sonst bei ~150k automatisch zusammen und kann dabei Freigabe-Korrekturen
 # verlieren (Plan-Modus-Test tempo-v7, 2026-10-04: zwei Compactions).
 # Endet eine Etappe ohne neue Aenderung im Worktree, startet keine gleiche
@@ -49,21 +65,39 @@
 # 5 Planform fehlerhaft, 6 zu gross fuer eine Sitzung (teilen oder Plan-Modus).
 # Plan-Modus: Richtwert DS_PLAN_ZUEGE (60), Grenze DS_PLAN_ZUEGE_MAX (100),
 # hoechstens DS_PAKETE (4) Pakete im Schnitt.
-# Braucht: bash >= 4.4, git, jq, curl, python3, pgrep, GNU stat/tac/realpath, claude (CLI).
+# Braucht: bash >= 4.4, git, jq, curl, python3, GNU stat/tac/realpath, claude (CLI).
+# Laeuft auch unter Git-Bash (Windows); dort CLAUDE_CODE_GIT_BASH_PATH setzen.
 set -euo pipefail
 
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 ARBEIT="$REPO/ds/arbeit"
 WT_BASIS="$(dirname "$REPO")/$(basename "$REPO")-ds"
-MODEL=${DS_MODEL:-deepseek-flash}
+AUFGABEN=.ds/aufgaben.md   # Staffelstab des Arbeiters, relativ zum Worktree (git-ignoriert)
+
+# Rechner-Einstellungen (Backend, Server, Modell): Umgebungsvariablen gehen vor.
+if [[ -r ~/.config/bauleiter/env ]]; then
+  while IFS='=' read -r k v; do
+    [[ $k =~ ^DS_[A-Z_]+$ && -z ${!k+x} ]] && export "$k=$v"
+  done < <(grep -E '^DS_[A-Z_]+=' ~/.config/bauleiter/env)
+fi
+BACKEND=${DS_BACKEND:-deepseek}
+case $BACKEND in
+  deepseek) BASE_URL=https://api.deepseek.com/anthropic; LAGE=https://status.deepseek.com
+            MODEL=${DS_MODEL:-deepseek-flash}; d_api_still=90; d_probe=45; d_kontext=110000 ;;
+  lokal)    BASE_URL=${DS_BASE_URL:-}; BASE_URL=${BASE_URL%/}; BASE_URL=${BASE_URL%/v1}
+            LAGE="$BASE_URL/metrics"
+            MODEL=${DS_MODEL:-}; d_api_still=300; d_probe=180; d_kontext=80000 ;;
+  *) echo "DS_BACKEND=$BACKEND unbekannt (deepseek | lokal)" >&2; exit 2 ;;
+esac
+CLAUDE_BIN=${DS_CLAUDE:-claude}
 STILL_MAX=${DS_STILL:-300}
-API_STILL_MAX=${DS_API_STILL:-90}
-PROBE_MAX=${DS_PROBE:-45}
+API_STILL_MAX=${DS_API_STILL:-$d_api_still}
+PROBE_MAX=${DS_PROBE:-$d_probe}
 LAUF_MAX=${DS_MAX:-3600}
 WARTE_MAX=${DS_WARTE:-570}
 ZUEGE_MAX=${DS_ZUEGE_MAX:-250}
 ZUEGE_RICHT=${DS_ZUEGE_RICHT:-150}
-KONTEXT_MAX=${DS_KONTEXT:-110000}
+KONTEXT_MAX=${DS_KONTEXT:-$d_kontext}
 ETAPPEN_MAX=${DS_ETAPPEN:-4}
 PLAN_ZUEGE_RICHT=${DS_PLAN_ZUEGE:-60}
 PLAN_ZUEGE_MAX=${DS_PLAN_ZUEGE_MAX:-100}
@@ -89,7 +123,7 @@ ZWEIG="ds/$name"
 ERLAUBT_TEXT=$(printf '%s\n' "${DS_ERLAUBT[@]}" 'Bash(git status:*)' 'Bash(git diff:*)' \
   'Bash(git log:*)' 'Bash(ls:*)' 'Bash(grep:*)' |
   sed -e 's/^Bash(//' -e 's/:\*)$//' -e 's/)$//' | paste -sd ',' | sed 's/,/, /g')
-ROLLE="Du bist der Arbeiter (DeepSeek) in diesem Projekt. Ein Claude-Opus-Auftraggeber
+ROLLE="Du bist der Arbeiter in diesem Projekt. Ein Claude-Opus-Auftraggeber
 hat dir einen Auftrag ausformuliert und reviewt dein Ergebnis.
 - Halte dich eng an den Auftrag: nur die genannten Dateien/Grenzen, kein Umbau nebenbei.
 - Nur LESEN: ${DS_NUR_LESEN[*]}. Gedaechtnis-/Dokupflege macht der Auftraggeber;
@@ -108,9 +142,11 @@ Werkzeuge (jede Ablehnung kostet Zuege):
 Vorgehen:
 - Starte bei den Einstiegsstellen aus dem Auftrag (oder der Lagekarte);
   erkunde nur, was der naechste Schritt braucht.
-- Lege frueh eine Aufgabenliste mit TodoWrite an, je Punkt die Fundstellen
-  (datei:zeile), und halte sie aktuell. Sie ist dein Staffelstab: bei grossem
-  Kontext macht eine frische Sitzung mit genau dieser Liste weiter.
+- Lege frueh die Aufgabenliste $AUFGABEN an (Write; Edit zum Aktualisieren):
+  je Punkt eine Zeile \"- [ ] Teilschritt -- datei:zeile\", erledigt \"- [x]\",
+  darunter \"## Notizen\" mit Fundstellen und Befunden. Halte sie aktuell; sie
+  ist dein Staffelstab: bei grossem Kontext macht eine frische Sitzung mit genau
+  dieser Datei weiter. Sie gehoert nicht zum Ergebnis (git-ignoriert).
 - Baue in Teilschritten (ein Vertrag, eine Funktion, ein Test). Nach jedem
   Edit prueft ein Hook die Datei und haengt Fehler an: sofort beheben, ausser
   sie stammen erkennbar von einem noch offenen Teil desselben Teilschritts.
@@ -135,7 +171,7 @@ erledigt | teilweise | blockiert -- ein Satz
 # Rolle in der Planphase (plan): nur lesen, Plan in fester Gliederung. Opus
 # prueft ihn ohne Code; ds/plan.py prueft die Form. Zugzahlen schaetzt der
 # Planer nicht (Test tempo-v7: ~52 geschaetzt, 315 gebraucht).
-PLAN_ROLLE="Du bist der Planer (DeepSeek) in diesem Projekt. Ein Claude-Opus-Auftraggeber
+PLAN_ROLLE="Du bist der Planer in diesem Projekt. Ein Claude-Opus-Auftraggeber
 hat Ziel und Leitplanken vorgegeben und prueft deinen Plan, OHNE Code zu lesen.
 Du hast nur Lese-Werkzeuge und aenderst nichts.
 - Dein Arbeitsverzeichnis ist die Worktree-Wurzel; relative Pfade.
@@ -169,7 +205,7 @@ Abhaengigkeiten als \"nach: P1\" (das Paket baut auf dem uebernommenen P1 auf)."
 # Rolle der Vorerkundung (lage): Planer-Werkzeuge, aber der Auftrag ist schon
 # entschieden. Ergebnis ist eine Lagekarte, mit der der Arbeiter nur noch die
 # Fundstellen liest statt ganzer Dateien (Lesebudget ueber DS_LESEBUDGET).
-LAGE_ROLLE="Du bist der Erkunder (DeepSeek) in diesem Projekt. Der Auftrag unten ist
+LAGE_ROLLE="Du bist der Erkunder in diesem Projekt. Der Auftrag unten ist
 fertig entschieden; ein Arbeiter baut ihn nach dir in einer frischen Sitzung
 mit kleinem Kontext. Deine Lagekarte erspart ihm das Lesen ganzer Dateien.
 Du hast nur Lese-Werkzeuge und aenderst nichts.
@@ -200,32 +236,33 @@ starte_claude() {  # $1 Prompt-Datei, weitere Argumente an claude
   # Nur im Hintergrund aufrufen (laufe): cd + exec ersetzen die Subshell durch
   # claude, damit $! die PID von claude ist und der Watchdog sie beenden kann.
   local prompt=$1 p; shift
-  [[ -r ~/.config/deepseek/env ]] || { echo "~/.config/deepseek/env fehlt" >&2; exit 1; }
-  set -a; . ~/.config/deepseek/env; set +a
-  local -a gesperrt=() effort=() modus
+  zugang
+  local -a gesperrt=() effort=() modus weg=() env_be=()
   for p in "${DS_NUR_LESEN[@]}"; do gesperrt+=("Edit($p/**)" "Write($p/**)"); done
   [[ -z ${DS_EFFORT:-} ]] || effort=(--effort "$DS_EFFORT")
+  local settings="$ARBEIT/$name.settings.json"
   if [[ $MODUS == plan || $MODUS == lage ]]; then
     local rolle=$PLAN_ROLLE
     [[ $MODUS == lage ]] && rolle=$LAGE_ROLLE
+    jq -n --argjson e "$(settings_env)" '{env:$e}' > "$settings"
     modus=(--append-system-prompt "$rolle" --max-turns "$PLAN_ZUEGE_MAX"
-           --setting-sources project,local
+           --setting-sources project,local --settings "$settings"
            --tools Read,Glob,Grep --allowedTools Read Glob Grep
            --disallowedTools WebFetch WebSearch)
   else
     # Pruef-Hook nach jedem Edit; nur Projekt-Einstellungen laden, nicht die des
     # Nutzers (dessen Hooks, z. B. Prompt-Sperren, gelten fuer den Arbeiter nicht).
     # Merk-Hook nach Lese-Schritten: verlangt die Aufgabenliste (Staffelstab).
-    local settings="$ARBEIT/$name.settings.json"
-    jq -n --arg c "$REPO/ds/arbeiter-pruef.sh" \
-          --arg m "$(printf '%q %q' "$REPO/ds/arbeiter-merker.sh" "$KONTEXT_MAX")" '{hooks:{PostToolUse:[
+    jq -n --arg c "$REPO/ds/arbeiter-pruef.sh" --argjson e "$(settings_env)" \
+          --arg m "$(printf '%q %q' "$REPO/ds/arbeiter-merker.sh" "$KONTEXT_MAX")" '{env:$e, hooks:{PostToolUse:[
       {matcher:"Edit|Write|MultiEdit", hooks:[{type:"command", command:$c, timeout:60}]},
       {matcher:"Read|Grep|Glob", hooks:[{type:"command", command:$m, timeout:20}]}]}}' > "$settings"
+    # Keine Aufgaben-Werkzeuge (TodoWrite/TaskCreate): die Liste ist die Datei $AUFGABEN.
     modus=(--append-system-prompt "$ROLLE" --permission-mode acceptEdits
            --setting-sources project,local --settings "$settings"
            --max-turns "$ZUEGE_MAX"
-           --tools Read,Edit,Write,Glob,Grep,Bash,TodoWrite
-           --allowedTools Read Edit Write Glob Grep TodoWrite
+           --tools Read,Edit,Write,Glob,Grep,Bash
+           --allowedTools Read Edit Write Glob Grep
              "${DS_ERLAUBT[@]}"
              'Bash(git status:*)' 'Bash(git diff:*)' 'Bash(git log:*)'
              'Bash(ls:*)' 'Bash(grep:*)'
@@ -233,10 +270,26 @@ starte_claude() {  # $1 Prompt-Datei, weitere Argumente an claude
              'Bash(git commit:*)' 'Bash(git push:*)' 'Bash(git checkout:*)'
              'Bash(git reset:*)' 'Bash(git switch:*)' WebFetch WebSearch)
   fi
+  # Geerbte Claude-/Anthropic-Variablen (der Bauleiter startet uns aus einer
+  # Claude-Code-Sitzung: deren Anmeldung, Sitzungs-IDs, Sockets) gelten fuer den
+  # Arbeiter nicht. Durchgereicht wird nur, was in DS_DURCHREICHEN steht.
+  local v
+  for v in $(compgen -e | grep -E '^(ANTHROPIC_|CLAUDE)' || true); do
+    [[ " CLAUDE_CODE_GIT_BASH_PATH ${DS_DURCHREICHEN:-} " == *" $v "* ]] || weg+=(-u "$v")
+  done
+  if [[ $BACKEND == lokal ]]; then
+    env_be=(ANTHROPIC_AUTH_TOKEN="${DS_AUTH_TOKEN:-lokal}"
+            CLAUDE_CONFIG_DIR="${DS_CONFIG_DIR:-$ARBEIT/claude-home}"
+            CLAUDE_CODE_ATTRIBUTION_HEADER=0)
+    mkdir -p "${DS_CONFIG_DIR:-$ARBEIT/claude-home}"
+  else
+    env_be=(ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY")
+    [[ -n ${CLAUDE_CONFIG_DIR:-} ]] && env_be+=(CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR")
+  fi
   cd "$WT"
-  exec env -u ANTHROPIC_API_KEY \
-      ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic \
-      ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY" \
+  exec env "${weg[@]}" \
+      ANTHROPIC_BASE_URL="$BASE_URL" \
+      "${env_be[@]}" \
       ANTHROPIC_MODEL="$MODEL" \
       ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL" \
       ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL" \
@@ -244,22 +297,60 @@ starte_claude() {  # $1 Prompt-Datei, weitere Argumente an claude
       CLAUDE_CODE_SUBAGENT_MODEL="$MODEL" \
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
       DEEPSEEK_API_KEY= \
-    claude -p --model "$MODEL" --output-format stream-json --verbose \
+    "$CLAUDE_BIN" -p --model "$MODEL" --output-format stream-json --verbose \
       --include-partial-messages "${modus[@]}" "${effort[@]}" \
       "$@" < "$prompt"
 }
 
+settings_env() {  # env-Block der Arbeiter-Settings (JSON)
+  # Lokal: ohne Attribution-Header bleibt der Prompt-Anfang je Anfrage gleich,
+  # sonst verwirft der Server bei jedem Zug den Prefix-Cache. Laut Berichten
+  # wirkt die Variable nur zuverlaessig aus dem env-Block der Settings.
+  if [[ $BACKEND == lokal ]]; then echo '{"CLAUDE_CODE_ATTRIBUTION_HEADER":"0"}'; else echo '{}'; fi
+}
+
+zugang() {  # Backend-Zugang laden und pruefen; lokal: Modell bestimmen
+  if [[ $BACKEND == deepseek ]]; then
+    [[ -r ~/.config/deepseek/env ]] || { echo "~/.config/deepseek/env fehlt" >&2; exit 1; }
+    set -a; . ~/.config/deepseek/env; set +a
+    return
+  fi
+  [[ -n $BASE_URL ]] || { echo "DS_BACKEND=lokal braucht DS_BASE_URL (z. B. http://gpu-server:8000)" >&2; exit 1; }
+  [[ -n $MODEL ]] && return
+  # Ohne DS_MODEL: das einzige Modell des Servers (vLLM serviert genau eins).
+  local liste
+  liste=$(curl -s -m 10 "$BASE_URL/v1/models" | jq -r '.data[]?.id' 2>/dev/null || true)
+  if [[ -n $liste && $(wc -l <<<"$liste") == 1 ]]; then
+    MODEL=$liste
+  else
+    echo "DS_MODEL fehlt und $BASE_URL/v1/models nennt nicht genau ein Modell:" \
+      "$(echo $liste | head -c 300)" >&2
+    exit 1
+  fi
+}
+
 probe() {  # Erreichbarkeit: kommt binnen PROBE_MAX s ein echtes Token?
-  set -a; . ~/.config/deepseek/env; set +a
+  zugang
+  local -a auth=(-H "x-api-key: ${DEEPSEEK_API_KEY:-}")
+  if [[ $BACKEND == lokal ]]; then
+    auth=(-H "x-api-key: ${DS_AUTH_TOKEN:-lokal}")
+    # Lokale Server wechseln das Modell ohne Ankuendigung: erst pruefen, dass
+    # DS_MODEL geladen ist, sonst arbeitet (und misst) ein anderes Modell.
+    if ! curl -s -m 10 "$BASE_URL/v1/models" | jq -e --arg m "$MODEL" 'any(.data[]?; .id == $m)' >/dev/null 2>&1; then
+      echo "ds-worker: ABBRUCH -- $BASE_URL bietet $MODEL nicht an (geladen:" \
+        "$(curl -s -m 10 "$BASE_URL/v1/models" | jq -r '[.data[]?.id]|join(", ")' 2>/dev/null || echo 'nicht erreichbar'))" >&2
+      return 3
+    fi
+  fi
   # { ...; true; }: grep -q endet beim ersten Treffer, der SIGPIPE von curl
   # darf unter pipefail nicht als Fehler zaehlen.
-  { curl -s -N -m "$PROBE_MAX" https://api.deepseek.com/anthropic/v1/messages \
-    -H "x-api-key: $DEEPSEEK_API_KEY" -H 'anthropic-version: 2023-06-01' \
+  { curl -s -N -m "$PROBE_MAX" "$BASE_URL/v1/messages" \
+    "${auth[@]}" -H 'anthropic-version: 2023-06-01' \
     -H 'content-type: application/json' \
     -d '{"model":"'"$MODEL"'","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"ok"}]}' \
     2>/dev/null; true; } | grep -q -m1 'content_block_delta' && return 0
   echo "ds-worker: ABBRUCH -- $MODEL liefert binnen $PROBE_MAX s kein Token" \
-    "(https://status.deepseek.com; spaeter erneut)" >&2
+    "($LAGE; spaeter erneut)" >&2
   return 3
 }
 
@@ -282,7 +373,7 @@ laufe() {  # $1 Prompt-Datei, $2 Ergebnis-JSON, weitere Argumente an claude
     frist=$API_STILL_MAX
     letzt=$(letztes_ereignis "$log")
     [[ $letzt == *'"tool_use"'* ]] && frist=$STILL_MAX
-    if (( still > frist )); then grund="keine Ausgabe seit $still s (Frist $frist s; $MODEL haengt? https://status.deepseek.com)"; break; fi
+    if (( still > frist )); then grund="keine Ausgabe seit $still s (Frist $frist s; $MODEL haengt? $LAGE)"; break; fi
     if (( SECONDS - start > LAUF_MAX )); then grund="Laufzeit ueber $LAUF_MAX s"; break; fi
     # Etappenwechsel: Kontext zu gross und zwischen zwei Zuegen (letztes
     # Ereignis = Werkzeug-Ergebnis oder "status requesting"). Edits sind dann
@@ -356,17 +447,18 @@ staffelstab() {  # $1 Grund-Prompt, $2 Etappe -> stdout: Prompt fuer die frische
 Du setzt eine begonnene Arbeit im selben Worktree fort. Die vorige Sitzung
 endete, weil ihr Kontext zu gross wurde; der Auftrag unten gilt unveraendert
 und vollstaendig. Erkunde nicht neu: lies geaenderte Dateien gezielt
-(\`git diff -- <datei>\`) und mach bei der Aufgabenliste weiter.
+(\`git diff -- <datei>\`) und mach bei der Aufgabenliste weiter. Sie liegt
+weiter in \`$AUFGABEN\`; lies sie einmal mit Read, bevor du sie mit Edit
+aktualisierst.
 
 ## Stand: geaenderte Dateien
 \`\`\`
 $(zeige_diff --stat | tail -n 40)
 \`\`\`
 
-## Deine letzte Aufgabenliste
-$(jq -rs '[.[] | select(.type == "assistant") | .message.content[]?
-  | select(.type == "tool_use" and .name == "TodoWrite") | .input.todos] | last // []
-  | map("- [\(.status)] \(.content)") | .[]' "$log" 2>/dev/null || true)
+## Deine Aufgabenliste ($AUFGABEN)
+$(if [[ -s $WT/$AUFGABEN ]]; then sed 's/^#/###/' "$WT/$AUFGABEN" | head -c 6000
+  else echo "(keine angelegt -- lege sie jetzt zuerst an)"; fi)
 
 ## Deine letzten Notizen
 $(jq -rs '[.[] | select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text]
@@ -383,7 +475,8 @@ diff_stand() { zeige_diff --binary | sha1sum | cut -c1-40; }
 zu_gross() {  # $1 Ergebnis-JSON, $2 Grund -> Ergebnis umschreiben, Exit 6
   local text="ZU GROSS: $2 Die Arbeit passt nicht in eine Sitzung von $KONTEXT_MAX Token.
 Opus: Auftrag in Pakete teilen oder Plan-Modus (Befunde statt ganzer Dateien).
-Was fertig ist, liegt im Worktree (ds/ds-worker.sh diff $name --stat)."
+Was fertig ist, liegt im Worktree (ds/ds-worker.sh diff $name --stat),
+der Stand des Arbeiters in $WT/$AUFGABEN."
   jq --arg t "$text" '.subtype = "zu_gross" | .is_error = true | .result = $t' "$1" > "$1.neu"
   mv "$1.neu" "$1"
   echo "ds-worker: ZU GROSS -- $2" >&2
@@ -451,7 +544,7 @@ vorerkunden() {  # $1 Grund-Prompt -> Lagekarte $name.lage.md; GRUND_PROMPT = Au
     printf '\n## Lagekarte (Vorerkundung, nur Fakten; der Auftrag oben gilt vor)\n\n'
     sed 's/^## /### /' "$lage"
     printf '\nBaue jetzt. Lege zuerst die Reihenfolge der Lagekarte als Aufgabenliste\n'
-    printf '(TodoWrite) an. Lies nur die Fundstellen (Read mit offset/limit), keine ganzen\n'
+    printf '(%s) an. Lies nur die Fundstellen (Read mit offset/limit), keine ganzen\n' "$AUFGABEN"
     printf 'Dateien; Schnittstellen stehen oben. Erkunde nur nach, was dort fehlt.\n'
   } > "$start"
   GRUND_PROMPT=$start
@@ -481,8 +574,8 @@ auswerten() {  # $1 JSON-Ergebnis des Laufs
   echo "--- Diff:"; zeige_diff --stat
 }
 
-tokens() {  # Tabelle Opus / Bauleiter / DeepSeek mit Kosten und Ersparnis
-  DS_MODEL=$MODEL python3 "$REPO/ds/tokens.py" "$name" || true
+tokens() {  # Tabelle Opus / Bauleiter / Arbeiter mit Kosten und Ersparnis
+  DS_BACKEND=$BACKEND DS_MODEL=${MODEL:-$BACKEND} python3 "$REPO/ds/tokens.py" "$name" || true
 }
 
 pruefen() {  # $1 Verzeichnis; Befehle: ```-Block unter "## Abnahme" im Auftrag
@@ -564,6 +657,12 @@ worktree_anlegen() {
   probe || { echo 3 > "$ARBEIT/$name.rc"; exit 3; }   # vor dem Worktree: haengt das Modell, bleibt nichts liegen
   mkdir -p "$WT_BASIS"
   git -C "$REPO" worktree add -q -b "$ZWEIG" "$WT" HEAD
+  # Aufgabenliste des Arbeiters ($AUFGABEN) nie in Diff, Uebernahme oder
+  # Fortschrittsmessung: info/exclude gilt fuer alle Worktrees des Repos.
+  local ex; ex=$(git -C "$WT" rev-parse --git-path info/exclude)
+  [[ $ex == /* || $ex =~ ^[A-Za-z]: ]] || ex="$WT/$ex"
+  mkdir -p "$(dirname "$ex")"
+  grep -qx '/.ds/' "$ex" 2>/dev/null || echo '/.ds/' >> "$ex"
   # Basis ist der aktuelle Arbeitsstand, nicht nur HEAD: nicht committete
   # Aenderungen des Haupt-Checkouts wandern als Basis-Commit mit (nur im
   # ds-Zweig). uebernehmen bringt danach nur zurueck, was der Arbeiter tat.
@@ -599,6 +698,11 @@ plan_py() { DS_WT_BASIS=$WT_BASIS python3 "$REPO/ds/plan.py" "$@"; }
 
 # Grund-Prompt eines Laufs: Basis fuer den Staffelstab bei Etappenwechsel.
 GRUND_PROMPT=
+
+# Laufende Laeufe erkennt warte an der PID-Datei (statt pgrep -f: gibt es
+# unter Git-Bash nicht, und die Kommandozeile ist dort nicht sichtbar).
+laeuft() { local p; p=$(cat "$ARBEIT/$name.pid" 2>/dev/null) && [[ -n $p ]] && kill -0 "$p" 2>/dev/null; }
+case $cmd in start|plan|bauen|nacharbeit) echo $$ > "$ARBEIT/$name.pid" ;; esac
 
 case $cmd in
 start)
@@ -758,7 +862,7 @@ warte)
   # Fuer den Bauleiter: start/plan/bauen/nacharbeit laufen im Hintergrund; ein
   # Aufruf wartet bis zum Ende (oder WARTE_MAX s), zeigt dann Bericht + Umfang.
   ende=$(( SECONDS + WARTE_MAX ))
-  while pgrep -f "ds-worker.sh (start|plan|bauen|nacharbeit) $name\$" >/dev/null; do
+  while laeuft; do
     (( SECONDS < ende )) || { echo "laeuft noch -- warte erneut aufrufen"; exit 0; }
     sleep 5
   done

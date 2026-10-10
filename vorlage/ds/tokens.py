@@ -501,6 +501,12 @@ def main():
     ds["aufrufe"] = zuege
 
     ds_modell = os.environ.get("DS_MODEL", "deepseek-flash")
+    # Lokales Backend (DS_BACKEND=lokal): keine Kosten je Token; die Ersparnis
+    # ist dann die ganze geschaetzte Direktumsetzung minus Opus und Bauleiter.
+    lokal = os.environ.get("DS_BACKEND") == "lokal"
+    if lokal:
+        PREISE[ds_modell] = (0.0, 0.0, 0.0, 0.0, 0.0)
+    arbeiter = "Arbeiter lokal" if lokal else "DeepSeek"
     if a.json:
         je = {}
         for ebene, modell, s in zeilen:
@@ -515,7 +521,7 @@ def main():
     print("| Ebene | Modell | Aufrufe | Eingabe | Cache gelesen | Cache geschrieben | Ausgabe | Kosten |")
     print("|---|---|---:|---:|---:|---:|---:|---:|")
     summe = 0.0
-    for ebene, modell, s in zeilen + [(f"DeepSeek ({n} {'Lauf' if n == 1 else 'Läufe'}, {zuege} Züge)", ds_modell, ds)]:
+    for ebene, modell, s in zeilen + [(f"{arbeiter} ({n} {'Lauf' if n == 1 else 'Läufe'}, {zuege} Züge)", ds_modell, ds)]:
         k = kosten(s, modell)
         summe += k or 0
         print(f"| {ebene} | {modell} | {round(s['aufrufe'])} | {mio(s['ein'])} | {mio(s['cr'])} | "
@@ -528,7 +534,7 @@ def main():
           f"{round(ds['aufrufe'] * 0.7)} Zuege): ≈ {de(lo)}-{de(hi)} $")
     print(f"**Ersparnis durch den Bauleiter: ≈ {de(lo - summe)}-{de(hi - summe)} $ "
           f"(≈ {de((lo - summe) * KURS_EUR)}-{de((hi - summe) * KURS_EUR)} €)**, "
-          f"Faktor {de(lo / summe, 1)}-{de(hi / summe, 1)}x")
+          f"Faktor {de(lo / max(summe, 0.01), 1)}-{de(hi / max(summe, 0.01), 1)}x")
     print()
     e = erk
     befehle = ", ".join(f"{w} {de(n, 0)}" for w, n in sorted(e["karte_befehle"].items()))
