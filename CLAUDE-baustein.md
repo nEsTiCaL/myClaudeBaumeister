@@ -6,6 +6,10 @@ Design, Review, Uebernahme und Commits; DeepSeek erkundet und baut im eigenen
 Worktree. Fehlen noch Designentscheidungen: erst mit dem Nutzer klaeren --
 Haiku und DeepSeek entscheiden nichts.
 
+Backend des Arbeiters: `DS_BACKEND` (deepseek | lokal, siehe README "Backend wechseln").
+Bei `lokal` (eigener Server, Modell der 32-GB-Klasse) Pakete kleiner schneiden
+und den klassischen Weg bevorzugen; `ds/ds-worker.sh probe` zeigt Server und Modell.
+
 Welcher Weg (Messung 38 Laeufe, ds/LEHREN.md): Delegation kostet ~0,3-1 $
 Grundbetrag (Median 1 $, davon 80 % Opus), Opus direkt ~0,035 $ je
 DeepSeek-Zug; DeepSeek braucht etwa 2-3x so viele Zuege wie du selbst.

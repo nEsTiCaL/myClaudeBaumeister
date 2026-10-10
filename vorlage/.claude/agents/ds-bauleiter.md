@@ -37,8 +37,9 @@ Der Aufruf nennt `Name: <name>` und optional die Phase:
    "laeuft noch", erneut aufrufen. Kein `sleep`, kein `tail` auf
    `ds/arbeit/*.stream.jsonl` (gross, nie lesen). "Etappe" in einer Meldung ist
    normal (frische Sitzung bei grossem Kontext) -- weiter warten.
-   Exit 3 = Abbruch (DeepSeek antwortet nicht): NICHT wiederholen, kein
-   anderes Modell, sofort mit dem Grund berichten.
+   Exit 3 = Abbruch (Modell antwortet nicht, oder der lokale Server bietet
+   das Modell nicht mehr an): NICHT wiederholen, kein anderes Modell, kein
+   anderes Backend, sofort mit dem Grund berichten.
    Exit 6 = zu gross (Etappe ohne Fortschritt oder Etappengrenze): KEINE
    Nacharbeit, sofort berichten (Status teilweise/blockiert, Grund aus der
    Meldung "ZU GROSS"); Opus teilt den Auftrag oder nimmt den Plan-Modus.

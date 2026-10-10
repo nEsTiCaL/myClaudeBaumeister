@@ -52,7 +52,7 @@ ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
 ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY
 ANTHROPIC_MODEL / DEFAULT_{OPUS,SONNET,HAIKU}_MODEL / CLAUDE_CODE_SUBAGENT_MODEL = deepseek-flash
 claude -p --output-format stream-json --permission-mode acceptEdits \
-  --tools Read,Edit,Write,Glob,Grep,Bash,TodoWrite --max-turns 250 \
+  --tools Read,Edit,Write,Glob,Grep,Bash --max-turns 250 \
   --setting-sources project,local --settings <PostToolUse-Hook> \
   --allowedTools <Read/Edit/… + Test-Präfixe aus ds/projekt.sh> \
   --disallowedTools 'Edit(memory/**)' 'Bash(git commit:*)' … WebFetch WebSearch \
@@ -63,6 +63,49 @@ Vorteil: dasselbe Agent-Harness (Tools, CLAUDE.md, Permissions) – nur das
 Modell ist billig. Die Hauptsitzung und das Claude-Abo bleiben unberührt.
 Alle Modell-Aliase werden umgebogen, damit kein interner Subagent versehentlich
 bei Anthropic landet.
+
+### Backend-Schalter: DeepSeek oder eigener Server (2026-10-10)
+Wo DeepSeek nicht erlaubt ist (Firmennetz, regulierter Code), übernimmt ein
+eigener Server mit Anthropic-Messages-API die Arbeiter-Rolle, z. B. vLLM auf
+einer einzelnen RTX 5090. `DS_BACKEND=lokal` biegt dieselbe Claude-Code-Instanz
+auf `DS_BASE_URL` um. Alles andere (Worktree, Abnahme, Hooks, Etappen,
+Plan-Modus) bleibt gleich. Unterschiede aus dem Betrieb:
+
+- **Modell-Prüfung:** Ein geteilter Server bekommt vom Admin andere Modelle.
+  `probe` prüft `/v1/models`, bevor ein Worktree entsteht (Exit 3).
+- **Prefix-Cache:** Der Attribution-Header von Claude Code ändert den
+  Prompt-Anfang je Anfrage. Lokal ist er aus, sonst rechnet der Server bei
+  jedem Zug den ganzen Kontext neu (gemessen: 52k Token kalt 9,7 s, mit
+  Cache-Treffer 2,3 s).
+- **Fenster:** Claude Code kennt das Kontextfenster eines unbekannten Modells
+  nicht (`unrecognized_model`). Die Etappengrenze (`DS_KONTEXT`, lokal 80k)
+  ist damit die einzige Begrenzung und liegt unter dem Server-Maximum.
+- **Isolation:** eigenes `CLAUDE_CONFIG_DIR`; geerbte Claude-Variablen der
+  Bauleiter-Sitzung (Anmeldung, Sitzungs-IDs, Sockets) werden entfernt.
+
+Erster Lauf (vLLM 0.28, Qwen3.8-27B NVFP4, RTX 5090, Testprojekt textstats):
+9 Züge, 59 s, Abnahme grün, Übernahme sauber. Für Aussagen über große
+Aufträge fehlen noch Messungen. Zu erwarten sind mehr Züge und mehr
+Nacharbeit als mit DeepSeek.
+
+### Aufgabenliste als Datei statt TodoWrite (2026-10-10)
+Claude Code 2.1.29x bietet im Headless-Modus kein `TodoWrite` mehr (statt
+dessen `TaskCreate`/`TaskUpdate`/`TaskList`). `--tools …,TodoWrite` ließ das
+Werkzeug still weg; Merk-Hook und Staffelstab liefen damit ins Leere. Statt
+auf die neuen Namen umzustellen, ist die Liste jetzt eine Datei
+`.ds/aufgaben.md` im Worktree (`- [ ] Teilschritt -- datei:zeile`, darunter
+`## Notizen`). Sie
+
+- hängt an keinem Werkzeugnamen und keinem Claude-Code-Release,
+- lässt sich von jedem Modell mit Write/Edit pflegen,
+- liegt nach einem Watchdog-Abbruch noch auf der Platte,
+- ist per `info/exclude` aus Diff, Übernahme und Fortschrittsmessung heraus.
+
+Der Merk-Hook zählt Write/Edit auf diese Datei als Aktualisierung
+(TodoWrite/TaskCreate/TaskUpdate zählen weiter mit), der Staffelstab liest
+die Datei. Im ersten Lauf legte der Arbeiter sie ungefragt mit Fundstellen an.
+Bei einer erzwungenen Etappe (`DS_KONTEXT=9000`) kam sie vollständig in der
+frischen Sitzung an.
 
 ### Isolation per git-Worktree
 - `start` legt `../<repo>-ds/<name>` auf Zweig `ds/<name>` an.
@@ -162,6 +205,10 @@ gelesen und keine Zeile gebaut. Drei Gegenmaßnahmen greifen ineinander:
   **Exit 6 (zu groß)**. Die Etappengrenze endet ebenfalls mit Exit 6; bis
   2026-10-05 meldete sie Exit 0. Der Bauleiter macht bei 6 keine
   Nacharbeit, Opus teilt oder wechselt in den Plan-Modus.
+  Offener Grenzfall (2026-10-10, erzwungene Etappe bei `DS_KONTEXT=9000`):
+  War die Arbeit am Ende von Etappe 1 schon fertig, ändert Etappe 2 nichts
+  mehr und der Lauf endet mit Exit 6, obwohl die Abnahme grün ist. Mögliche
+  Maßnahme: vor Exit 6 `pruefen` laufen lassen, grün = erledigt.
 - **Merk-Hook** (`ds/arbeiter-merker.sh`, PostToolUse auf Read/Grep/Glob):
   Nach 12 Lese-Schritten ohne Aufgabenliste und ab 60 % der Etappengrenze
   hängt er eine Erinnerung an das Werkzeug-Ergebnis. Der Arbeiter soll
@@ -456,7 +503,11 @@ verschiebt harte Regeln dorthin, wo sie nicht ignoriert werden können.
   **keine** Sperre. Agent-Hooks werden erst nach einem Neustart von Claude Code aktiv.
 - Live-/Integrationstests, die Server o. ä. starten, gehören nicht in die
   Abnahme – der Worker darf sie nicht starten. Die macht Opus.
-- Linux-spezifisch (`stat -c`, `tac`, `pgrep -f`, `cp --reflink`); bash ≥ 4.4.
+- Braucht GNU-Werkzeuge (`stat -c`, `tac`, `cp --reflink`) und bash ≥ 4.4:
+  Linux oder Git-Bash unter Windows (`pgrep` ist seit 2026-10-10 nicht mehr nötig).
+- **Lokales Backend:** schwächere Modelle als DeepSeek (32-GB-Klasse), daher
+  kleinere Pakete und eher der klassische Weg als der Plan-Modus. Ein geteilter
+  Server bremst parallele Nutzer gegenseitig aus (KV-Cache); Pakete nacheinander.
 - Ersparnis basiert auf einem Schätzmodell; für belastbare Aussagen einzelne
   Aufträge kontrolliert doppelt bauen.
 

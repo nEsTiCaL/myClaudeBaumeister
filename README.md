@@ -37,12 +37,15 @@ vorlage/                 was ins Projekt kopiert wird:
 
 ## Voraussetzungen
 
-- Linux (macOS nur mit GNU coreutils und bash ≥ 4.4)
-- `git`, `jq`, `curl`, `python3`, `pgrep`, [Claude Code](https://claude.com/claude-code) (`claude`)
+- Linux (macOS nur mit GNU coreutils und bash ≥ 4.4); Windows mit Git-Bash geht
+  ebenfalls (getestet 2026-10-10, siehe „Backend wechseln“)
+- `git`, `jq`, `curl`, `python3`, [Claude Code](https://claude.com/claude-code) (`claude`)
 - optional für `ds/karte`: Go ≥ 1.24 und ein C-Compiler (Grammatiken sind C). Der
   erste Build lädt die Go-Module. Ein mit `paket.sh` gebautes Archiv enthält das
   Binary schon (linux).
-- DeepSeek-API-Schlüssel (platform.deepseek.com)
+- DeepSeek-API-Schlüssel (platform.deepseek.com) **oder** ein eigener Modellserver
+  mit Anthropic-Messages-API (vLLM, llama.cpp `llama-server`, Ollama ≥ 0.14),
+  siehe „Backend wechseln“
 - das Zielprojekt ist ein git-Repository mit Tests, die per Befehl laufen
 
 ## Einrichten in einem Projekt
@@ -111,11 +114,56 @@ den Plan und schreibt eine Freigabe mit den Korrekturen, DeepSeek baut
 (`Phase: bauen`) oder der Plan wird mit `ds/ds-worker.sh teilen` in Pakete
 zerlegt.
 
+## Backend wechseln: DeepSeek oder eigener Server
+
+Der Arbeiter ist immer Claude Code; gewechselt wird nur, wohin es seine
+Anfragen schickt. Der Schalter ist `DS_BACKEND`:
+
+| `DS_BACKEND` | Ziel | Zugang |
+|---|---|---|
+| `deepseek` (Standard) | `api.deepseek.com/anthropic`, Modell `deepseek-flash` | `~/.config/deepseek/env` |
+| `lokal` | eigener Server mit `/v1/messages` (vLLM, llama-server, Ollama) | `DS_BASE_URL`, optional `DS_MODEL`, `DS_AUTH_TOKEN` |
+
+Einstellen je Rechner in `~/.config/bauleiter/env` (Umgebungsvariablen gehen vor):
+```sh
+DS_BACKEND=lokal
+DS_BASE_URL=http://gpu-server:8000
+DS_MODEL=Qwen3.8-27B
+```
+Prüfen ohne Auftrag: `ds/ds-worker.sh probe` (Server erreichbar, Modell
+geladen, erstes Token kommt).
+
+Was `lokal` anders macht:
+- **Modell-Prüfung vor jedem Lauf.** Lokale Server wechseln das Modell ohne
+  Ankündigung. Ist `DS_MODEL` nicht geladen, bricht `probe` mit Exit 3 ab,
+  statt mit einem fremden Modell zu bauen. Ohne `DS_MODEL` wird das einzige
+  Modell aus `/v1/models` genommen.
+- **Eigenes Konfig-Verzeichnis** (`ds/arbeit/claude-home`): der Arbeiter
+  sieht keine Anthropic-Anmeldung und keine Nutzer-Settings.
+- **Attribution-Header aus** (`CLAUDE_CODE_ATTRIBUTION_HEADER=0`), sonst
+  ändert sich der Prompt-Anfang je Anfrage und der Prefix-Cache des Servers trifft nie.
+- **Andere Standards:** `DS_KONTEXT` 80000 (Claude Code kennt das Fenster
+  eines unbekannten Modells nicht), `DS_API_STILL` 300, `DS_PROBE` 180.
+- **Kosten:** `tokens.py` rechnet den Arbeiter mit 0 $ je Token.
+
+Für alle Backends gilt: geerbte `CLAUDE*`/`ANTHROPIC*`-Variablen der
+aufrufenden Claude-Code-Sitzung werden nicht an den Arbeiter weitergegeben
+(Ausnahmen: `CLAUDE_CODE_GIT_BASH_PATH` und was in `DS_DURCHREICHEN` steht).
+
+**Windows (Git-Bash):** `jq` z. B. per `winget install jqlang.jq`;
+`DS_CLAUDE` auf `claude.exe` setzen, falls es nicht im PATH liegt;
+`CLAUDE_CODE_GIT_BASH_PATH` auf die `bash.exe` von Git. `warte` erkennt
+laufende Läufe an `ds/arbeit/<name>.pid` statt per `pgrep`.
+
 ## Stellschrauben (Umgebungsvariablen)
 
 | Variable | Standard | Wirkung |
 |---|---|---|
-| `DS_KONTEXT` | 110000 | Kontextgröße, ab der eine frische Sitzung (Etappe) weitermacht, statt dass Claude Code zusammenfasst |
+| `DS_BACKEND` | deepseek | `deepseek` oder `lokal` (siehe „Backend wechseln“) |
+| `DS_BASE_URL`, `DS_AUTH_TOKEN` | –, lokal | Server und Token für `lokal` |
+| `DS_CLAUDE`, `DS_CONFIG_DIR` | claude, ds/arbeit/claude-home | claude-Programm; Konfig-Verzeichnis des lokalen Arbeiters |
+| `DS_DURCHREICHEN` | – | geerbte Claude-Variablen, die der Arbeiter trotzdem bekommt (Leerzeichen-Liste) |
+| `DS_KONTEXT` | 110000 (lokal 80000) | Kontextgröße, ab der eine frische Sitzung (Etappe) weitermacht, statt dass Claude Code zusammenfasst |
 | `DS_ETAPPEN` | 4 | höchstens so viele Etappen je Lauf |
 | `DS_LESEBUDGET` | `DS_KONTEXT`/2 | Kern-Lesebudget (Token), ab dem `start` zuerst vorerkundet (Lagekarte) |
 | `DS_VORERKUNDUNG` | auto | `auto` (über dem Budget und bei Etappe ohne Fortschritt), `immer`, `aus` |
@@ -124,7 +172,7 @@ zerlegt.
 | `DS_PLAN_ZUEGE` / `DS_PLAN_ZUEGE_MAX` | 60 / 100 | Richtwert / Grenze der Planphase |
 | `DS_PAKETE` | 4 | höchstens so viele Pakete im Schnitt |
 | `DS_MODEL`, `DS_EFFORT` | deepseek-flash, – | Modell, `--effort` (A/B-Messungen) |
-| `DS_STILL`, `DS_API_STILL`, `DS_MAX`, `DS_PROBE` | 300, 90, 3600, 45 | Watchdog-Fristen in Sekunden |
+| `DS_STILL`, `DS_API_STILL`, `DS_MAX`, `DS_PROBE` | 300, 90 (lokal 300), 3600, 45 (lokal 180) | Watchdog-Fristen in Sekunden |
 
 ## Exit-Codes von `ds-worker.sh`
 

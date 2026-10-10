@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PostToolUse-Hook des DeepSeek-Arbeiters (von ds/ds-worker.sh per --settings
+# PostToolUse-Hook des Arbeiters (von ds/ds-worker.sh per --settings
 # gesetzt): prueft nach jedem Edit/Write die Datei mit nach_edit() aus
 # ds/projekt.sh und haengt Fehler als additionalContext an das Tool-Ergebnis.
 # Anlass 2026-10-04: tempo-v7 baute 98 Zuege ohne Pruefung, danach Rot-Welle
@@ -23,6 +23,7 @@ cwd=$(jq -r '.cwd // empty' <<<"$ein")
 cd "$cwd" || exit 0
 rel=$(realpath --relative-to=. "$datei")
 [[ $rel != ../* ]] || exit 0
+[[ $rel != .ds/* ]] || exit 0   # Aufgabenliste des Arbeiters, kein Projektcode
 
 fehler=$(timeout 30 bash -c "$(declare -f nach_edit); nach_edit \"\$1\"" _ "$rel" 2>&1)
 [[ -n ${fehler//[[:space:]]/} ]] || exit 0

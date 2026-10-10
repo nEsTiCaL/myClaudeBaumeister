@@ -17,6 +17,7 @@
 #   ds/ds-worker.sh tokens     <name>   # Token + Kosten: Opus, Bauleiter, DeepSeek (ds/tokens.py)
 #   ds/ds-worker.sh pruefen    <name> [--haupt]  # Abnahmebefehle des Auftrags, nur gruen/ROT
 #   ds/ds-worker.sh warte      <name>   # blockiert bis Laufende (max DS_WARTE s, 570)
+#   ds/ds-worker.sh probe              # Backend erreichbar, Modell geladen? (ohne Auftrag)
 #
 # Backend (Werkzeugwechsel): DS_BACKEND=deepseek (Standard) | lokal.
 #   deepseek  api.deepseek.com/anthropic; Zugang ~/.config/deepseek/env mit
@@ -112,7 +113,8 @@ vor_pruefen() { :; }
 mkdir -p "$ARBEIT"
 
 cmd=${1:-}; name=${2:-}
-[[ -n $cmd && -n $name ]] || { sed -n 6,20p "$0"; exit 2; }
+[[ $cmd == probe ]] && name=${name:-probe}
+[[ -n $cmd && -n $name ]] || { sed -n 6,21p "$0"; exit 2; }
 [[ $name =~ ^[a-z0-9-]+$ ]] || { echo "Name nur a-z, 0-9, -" >&2; exit 2; }
 WT="$WT_BASIS/$name"
 ZWEIG="ds/$name"
@@ -753,6 +755,7 @@ plan)
   exit $rc
   ;;
 form) plan_py pruefen "$name" ;;
+probe) probe && echo "ok: Backend $BACKEND, Modell $MODEL, $BASE_URL (Etappe ab $(( KONTEXT_MAX / 1000 ))k)" ;;
 budget)
   # Fuer Opus beim Schreiben des Auftrags: was liest der Arbeiter? Ueber der
   # Grenze erkundet start zuerst vor (Lagekarte); besser: Auftrag teilen.
@@ -874,5 +877,5 @@ verwerfen)
   worktree_weg
   echo "verworfen"
   ;;
-*) sed -n 6,20p "$0"; exit 2 ;;
+*) sed -n 6,21p "$0"; exit 2 ;;
 esac

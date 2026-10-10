@@ -86,9 +86,14 @@ bash "$ziel/ds/bauleiter-sperre.sh" --test >/dev/null && echo "Sperre: Selbsttes
 bash "$ziel/ds/arbeiter-merker.sh" --test >/dev/null && echo "Merk-Hook: Selbsttest gruen"
 bash "$ziel/ds/karte-hinweis.sh" --test >/dev/null && echo "Karte-Hinweis: Selbsttest gruen"
 fehlt=()
-for c in git jq curl python3 pgrep claude; do command -v "$c" >/dev/null || fehlt+=("$c"); done
+for c in git jq curl python3 "${DS_CLAUDE:-claude}"; do command -v "$c" >/dev/null || fehlt+=("$c"); done
 (( ${#fehlt[@]} == 0 )) || echo "WARNUNG: fehlende Werkzeuge: ${fehlt[*]}"
-[[ -r ~/.config/deepseek/env ]] || echo "WARNUNG: ~/.config/deepseek/env fehlt (DEEPSEEK_API_KEY=...)"
+backend=${DS_BACKEND:-$(sed -n 's/^DS_BACKEND=//p' ~/.config/bauleiter/env 2>/dev/null)}
+if [[ ${backend:-deepseek} == deepseek ]]; then
+  [[ -r ~/.config/deepseek/env ]] || echo "WARNUNG: ~/.config/deepseek/env fehlt (DEEPSEEK_API_KEY=...)"
+else
+  echo "Backend: $backend (~/.config/bauleiter/env); Probe: ds/ds-worker.sh probe"
+fi
 grep -qs 'ds-bauleiter' "$ziel/CLAUDE.md" ||
   echo "TODO: Abschnitt aus $MODUL/CLAUDE-baustein.md in $ziel/CLAUDE.md uebernehmen"
 # Grenzen und Verwendungen liefert der Hook karte-hinweis.sh von selbst; die
